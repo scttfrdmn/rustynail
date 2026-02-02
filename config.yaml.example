@@ -1,0 +1,37 @@
+# RustyNail Configuration Example
+# Copy to config.yaml and fill in your values
+
+gateway:
+  # WebSocket server port (for future dashboard)
+  websocket_port: 18789
+
+  # HTTP API port (health checks, metrics)
+  http_port: 8080
+
+  # Log level: trace, debug, info, warn, error
+  log_level: info
+
+channels:
+  # Discord configuration
+  discord:
+    enabled: true
+    auth:
+      # Get from https://discord.com/developers/applications
+      token: ${DISCORD_BOT_TOKEN}
+
+agents:
+  # LLM provider: currently only "anthropic" supported
+  llm_provider: anthropic
+
+  # Model to use
+  llm_model: claude-3-5-sonnet-20241022
+
+  # Anthropic API key
+  # Get from https://console.anthropic.com
+  api_key: ${ANTHROPIC_API_KEY}
+
+  # Maximum conversation history to maintain per user
+  max_history: 20
+
+  # Temperature for responses (0.0 - 1.0)
+  temperature: 0.7
