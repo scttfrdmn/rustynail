@@ -4,9 +4,10 @@
 
 RustyNail is a high-performance personal AI assistant built with Rust and Agenkit-Rust. It connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact with it naturally through chat.
 
-![Status](https://img.shields.io/badge/status-in%20development-yellow)
-![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
-![License](https://img.shields.io/badge/license-MIT-blue)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.1.0)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
+[![Status](https://img.shields.io/badge/status-alpha-yellow)](https://github.com/scttfrdmn/rustynail)
 
 ## Features
 
@@ -269,9 +270,31 @@ Compared to BuckTooth (Go):
 
 Contributions are welcome! Please open an issue or submit a pull request.
 
+## Versioning
+
+This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+
+Current version: **0.1.0** (Alpha)
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
+
 ## License
 
-MIT
+Copyright 2026 Scott Friedman
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+See [LICENSE](LICENSE) for the full license text.
 
 ## Acknowledgments
 

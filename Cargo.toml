@@ -2,9 +2,14 @@
 name = "rustynail"
 version = "0.1.0"
 edition = "2021"
-authors = ["Scott Friedman"]
-description = "RustyNail - OpenClaw clone in Rust using Agenkit"
-license = "MIT"
+authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
+description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"
+license = "Apache-2.0"
+repository = "https://github.com/scttfrdmn/rustynail"
+homepage = "https://github.com/scttfrdmn/rustynail"
+keywords = ["ai", "assistant", "discord", "claude", "agenkit"]
+categories = ["command-line-utilities", "web-programming"]
+readme = "README.md"
 
 [dependencies]
 # Agenkit - local path to Rust implementation
