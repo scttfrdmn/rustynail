@@ -30,7 +30,7 @@ RustyNail is a high-performance personal AI assistant built with Rust and Agenki
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/scttfrdmn/rustynail.git
 cd rustynail
 
 # Build
