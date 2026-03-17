@@ -212,6 +212,33 @@ agents:
 - Channels (`tokio::sync::mpsc`) for cross-task communication
 - `Arc<Mutex<T>>` for shared mutable state (prefer `RwLock` when reads dominate)
 
+### Versioning (Semantic Versioning 2.0.0)
+
+Follow [semver.org](https://semver.org/spec/v2.0.0.html) strictly:
+
+- **MAJOR** (`X.0.0`): incompatible API or config changes
+- **MINOR** (`0.X.0`): new backwards-compatible functionality
+- **PATCH** (`0.0.X`): backwards-compatible bug fixes only
+
+Pre-1.0: minor bumps (`0.X.0`) may include breaking changes.
+
+### Changelog (Keep a Changelog 1.1.0)
+
+Follow [keepachangelog.com](https://keepachangelog.com/en/1.1.0/) strictly:
+
+- Every user-visible change goes in `CHANGELOG.md` before merging
+- `[Unreleased]` accumulates changes since the last release — **never leave it empty for long**
+- On release: rename `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD`, add fresh empty `[Unreleased]`, update comparison links at the bottom
+- **Only these section headers are valid** inside a release block:
+  - `### Added` — new features
+  - `### Changed` — changes to existing functionality
+  - `### Deprecated` — features to be removed in a future release
+  - `### Removed` — features removed in this release
+  - `### Fixed` — bug fixes
+  - `### Security` — security vulnerability fixes
+- **Never use**: `### Planned`, `### Technical Specifications`, `### Documentation`, or any other custom headers
+- Do NOT list planned future work in `[Unreleased]` — that belongs in GitHub issues
+
 ### Commit Convention (Conventional Commits)
 
 ```
