@@ -950,6 +950,13 @@ async fn admin_clear_memory_handler(
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     state.agent_manager.clear_history(&user_id, true).await;
+    if let Some(ref audit) = state.audit {
+        audit.log(AuditEvent::AdminAction {
+            endpoint: "clear_memory".to_string(),
+            param: Some(user_id.clone()),
+            success: true,
+        });
+    }
     Json(serde_json::json!({
         "status": "ok",
         "user_id": user_id,
@@ -962,6 +969,13 @@ async fn admin_reload_skills_handler(State(state): State<AppState>) -> impl Into
     let n = registry.discover_skills(&state.skills_config.paths);
     let ctx = registry.build_skill_context(state.skills_config.max_active);
     state.agent_manager.reload_skills_context(ctx).await;
+    if let Some(ref audit) = state.audit {
+        audit.log(AuditEvent::AdminAction {
+            endpoint: "reload_skills".to_string(),
+            param: None,
+            success: true,
+        });
+    }
     Json(serde_json::json!({
         "status": "ok",
         "skills_loaded": n
@@ -997,6 +1011,13 @@ async fn admin_channels_health_handler(State(state): State<AppState>) -> impl In
             }
         })
         .collect();
+    if let Some(ref audit) = state.audit {
+        audit.log(AuditEvent::AdminAction {
+            endpoint: "channels_health".to_string(),
+            param: None,
+            success: true,
+        });
+    }
     Json(entries)
 }
 

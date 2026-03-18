@@ -39,6 +39,14 @@ pub enum AuditEvent {
     AgentCreated { user_id: String },
     /// The LLM returned an error for a user's message.
     LlmError { user_id: String, error: String },
+    /// An admin API endpoint was called.
+    AdminAction {
+        endpoint: String,
+        /// Path parameter (e.g. user_id for memory clear).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        param: Option<String>,
+        success: bool,
+    },
 }
 
 // ── Internal record wrapper ───────────────────────────────────────────────────

@@ -13,6 +13,48 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, Mutex};
 
+#[allow(dead_code)]
+pub fn make_test_state_stub() -> AppState {
+    AppState {
+        channels: Arc::new(RwLock::new(Vec::new())),
+        agent_manager: Arc::new(AgentManager::new(AgentsConfig {
+            llm_provider: "stub".to_string(),
+            ..Default::default()
+        })),
+        whatsapp_tx: None,
+        whatsapp_verify_token: "test-verify-token".to_string(),
+        telegram_tx: None,
+        telegram_webhook_secret: String::new(),
+        slack_tx: None,
+        slack_signing_secret: String::new(),
+        sms_tx: None,
+        sms_auth_token: String::new(),
+        webhook_endpoints: Vec::new(),
+        webhook_tx: None,
+        webchat_sessions: None,
+        webchat_tx: None,
+        teams_tx: None,
+        teams_hmac_secret: String::new(),
+        user_prefs: Arc::new(UserPreferences::new()),
+        stats: MessageStats::new(),
+        dashboard_expected_auth: None,
+        api_token: None,
+        test_channel: None,
+        rate_limiter: RateLimiter::new(),
+        audit: None,
+        hot_config: Arc::new(RwLock::new(HotConfig {
+            log_level: "error".to_string(),
+            api_token: None,
+            rate_limit: RateLimitConfig::default(),
+            audit_enabled: false,
+            audit_path: String::new(),
+        })),
+        skills_config: SkillsConfig::default(),
+        cron_jobs: Vec::new(),
+        allowed_ws_origins: Vec::new(),
+    }
+}
+
 /// Minimal test config — no real channels, dummy api_key.
 pub fn make_test_config() -> Config {
     Config {

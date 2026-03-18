@@ -70,3 +70,107 @@ impl Agent for FallbackAgent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agenkit::core::{AgentError, Message};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Always succeeds with a fixed response.
+    struct OkAgent {
+        reply: String,
+    }
+
+    #[async_trait]
+    impl Agent for OkAgent {
+        fn name(&self) -> &str {
+            "ok"
+        }
+
+        async fn process(&self, _input: Message) -> Result<Message, AgentError> {
+            Ok(Message::with_text("assistant", self.reply.clone()))
+        }
+    }
+
+    /// Always fails with the configured error string.
+    struct FailAgent {
+        error: String,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl FailAgent {
+        fn new(error: impl Into<String>) -> (Self, Arc<AtomicU32>) {
+            let calls = Arc::new(AtomicU32::new(0));
+            (
+                Self {
+                    error: error.into(),
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Agent for FailAgent {
+        fn name(&self) -> &str {
+            "fail"
+        }
+
+        async fn process(&self, _input: Message) -> Result<Message, AgentError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AgentError::ProcessingError(self.error.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_primary_success_no_fallback() {
+        let primary = Arc::new(OkAgent {
+            reply: "hello".to_string(),
+        });
+        let agent = FallbackAgent::new(primary, vec![]);
+        let input = Message::with_text("user", "hi");
+        let result = agent.process(input).await.unwrap();
+        assert_eq!(result.content_as_str().unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_capacity_error_uses_fallback() {
+        let (primary, _) = FailAgent::new("upstream 503 service unavailable");
+        let fallback = Arc::new(OkAgent {
+            reply: "from fallback".to_string(),
+        });
+        let agent = FallbackAgent::new(Arc::new(primary), vec![fallback]);
+        let input = Message::with_text("user", "hi");
+        let result = agent.process(input).await.unwrap();
+        assert_eq!(result.content_as_str().unwrap(), "from fallback");
+    }
+
+    #[tokio::test]
+    async fn test_non_capacity_error_not_forwarded() {
+        let (primary, primary_calls) = FailAgent::new("400 bad request");
+        let (fb, fb_calls) = FailAgent::new("should not be called");
+        let agent = FallbackAgent::new(Arc::new(primary), vec![Arc::new(fb)]);
+        let input = Message::with_text("user", "hi");
+        let result = agent.process(input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("400"));
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fb_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_all_fallbacks_fail_returns_last_error() {
+        let (primary, _) = FailAgent::new("503 primary down");
+        let (fb1, _) = FailAgent::new("503 fb1 down");
+        let (fb2, _) = FailAgent::new("503 fb2 down");
+        let agent = FallbackAgent::new(Arc::new(primary), vec![Arc::new(fb1), Arc::new(fb2)]);
+        let input = Message::with_text("user", "hi");
+        let result = agent.process(input).await;
+        assert!(result.is_err());
+        // Last error should be from fb2
+        assert!(result.unwrap_err().to_string().contains("fb2 down"));
+    }
+}

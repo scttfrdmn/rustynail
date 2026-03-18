@@ -76,6 +76,8 @@ struct ConfigArgs {
 enum ConfigCommands {
     /// Validate configuration and print a summary (does not start the server)
     Check,
+    /// Run preflight validation checks and exit 0 (OK) or 1 (failed)
+    Validate,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -90,6 +92,7 @@ async fn main() -> Result<()> {
         Commands::Version => cmd_version(),
         Commands::Config(args) => match args.command {
             ConfigCommands::Check => cmd_config_check(),
+            ConfigCommands::Validate => cmd_config_validate(),
         },
         Commands::Completions { shell } => cmd_completions(shell),
         Commands::Mcp(args) => match args.command {
@@ -396,6 +399,80 @@ fn cmd_config_check() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// `rustynail config validate` — preflight checks; exits 0 (all pass) or 1 (any fail).
+fn cmd_config_validate() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("rustynail=warn")
+        .try_init();
+
+    let mut failures = 0usize;
+
+    // ── Check 1: config loads ─────────────────────────────────────────────────
+    let config = match Config::load() {
+        Ok(cfg) => {
+            let source = std::env::var("CONFIG_FILE")
+                .unwrap_or_else(|_| "(env vars)".to_string());
+            println!("[✓] Config loaded ({})", source);
+            cfg
+        }
+        Err(e) => {
+            println!("[✗] Config load failed: {}", e);
+            failures += 1;
+            // Cannot continue without config
+            println!("\n{} check(s) failed.", failures);
+            std::process::exit(1);
+        }
+    };
+
+    // ── Check 2: API key present ──────────────────────────────────────────────
+    if config.agents.api_key.trim().is_empty() {
+        println!("[✗] API key missing (agents.api_key / ANTHROPIC_API_KEY)");
+        failures += 1;
+    } else {
+        println!("[✓] API key present ({})", config.agents.llm_provider);
+    }
+
+    // ── Check 3: memory backend dependencies ─────────────────────────────────
+    match config.memory.backend.as_str() {
+        "redis" => {
+            if config.memory.redis_url.as_deref().map(|u| u.is_empty()).unwrap_or(true) {
+                println!("[✗] Memory backend is redis but memory.redis_url is not set");
+                failures += 1;
+            } else {
+                println!("[✓] Memory backend: redis (url set)");
+            }
+        }
+        "sqlite" => {
+            if config.memory.sqlite_path.as_deref().map(|p| p.is_empty()).unwrap_or(true) {
+                println!("[✗] Memory backend is sqlite but memory.sqlite_path is not set");
+                failures += 1;
+            } else {
+                println!("[✓] Memory backend: sqlite (path set)");
+            }
+        }
+        "postgres" => {
+            if config.memory.postgres_url.as_deref().map(|u| u.is_empty()).unwrap_or(true) {
+                println!("[✗] Memory backend is postgres but memory.postgres_url is not set");
+                failures += 1;
+            } else {
+                println!("[✓] Memory backend: postgres (url set)");
+            }
+        }
+        backend => {
+            println!("[✓] Memory backend: {}", backend);
+        }
+    }
+
+    // ── Summary ───────────────────────────────────────────────────────────────
+    if failures == 0 {
+        println!("[✓] All checks passed.");
+        Ok(())
+    } else {
+        println!("\n{} check(s) failed.", failures);
+        std::process::exit(1);
+    }
 }
 
 /// `rustynail completions <shell>` — print shell completion script.

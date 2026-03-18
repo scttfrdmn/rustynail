@@ -60,3 +60,68 @@ impl Default for RateLimiter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(enabled: bool, messages_per_window: u32, window_seconds: u64) -> RateLimitConfig {
+        RateLimitConfig {
+            enabled,
+            messages_per_window,
+            window_seconds,
+        }
+    }
+
+    #[test]
+    fn test_disabled_always_allows() {
+        let rl = RateLimiter::default();
+        let c = cfg(false, 1, 60);
+        // Even after many calls, disabled limiter always returns true
+        for _ in 0..10 {
+            assert!(rl.check_and_record("user1", &c));
+        }
+    }
+
+    #[test]
+    fn test_within_window_allows() {
+        let rl = RateLimiter::default();
+        let c = cfg(true, 5, 60);
+        // 3 messages under a limit of 5 → all pass
+        assert!(rl.check_and_record("user1", &c));
+        assert!(rl.check_and_record("user1", &c));
+        assert!(rl.check_and_record("user1", &c));
+    }
+
+    #[test]
+    fn test_exceeds_limit_blocks() {
+        let rl = RateLimiter::default();
+        let c = cfg(true, 3, 60);
+        assert!(rl.check_and_record("user1", &c)); // 1
+        assert!(rl.check_and_record("user1", &c)); // 2
+        assert!(rl.check_and_record("user1", &c)); // 3 — hits the limit
+        // 4th message should be blocked
+        assert!(!rl.check_and_record("user1", &c));
+    }
+
+    #[test]
+    fn test_window_reset_allows_again() {
+        let rl = RateLimiter::default();
+        // window_seconds = 0 means the window expires immediately after each call
+        let c = cfg(true, 2, 0);
+        assert!(rl.check_and_record("user1", &c)); // 1st call — resets window, count = 1
+        // With window_seconds=0, elapsed() >= Duration::ZERO is always true,
+        // so the next call resets and allows.
+        assert!(rl.check_and_record("user1", &c)); // window expired → reset, count = 1
+        assert!(rl.check_and_record("user1", &c)); // window expired → reset, count = 1
+    }
+
+    #[test]
+    fn test_independent_users() {
+        let rl = RateLimiter::default();
+        let c = cfg(true, 1, 60);
+        assert!(rl.check_and_record("alice", &c));
+        assert!(!rl.check_and_record("alice", &c)); // alice blocked
+        assert!(rl.check_and_record("bob", &c)); // bob unaffected
+    }
+}

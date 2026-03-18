@@ -205,6 +205,7 @@ Update this table at the start of each milestone planning session.
 | v0.10.0 | BuckTooth Remaining Gaps — PDF analysis, image analysis, Admin API, Cron scheduler, WS origin restriction, configurable shutdown timeout | Closed (released 2026-03-18) |
 | v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
 | v0.12.0 | Streaming & Memory Intelligence — Teams HMAC, vector decay, token compaction, WS streaming, OpenAI SSE | Closed (released 2026-03-18) |
+| v0.13.0 | Integration Testing & Operational Maturity — rate limiter/agent/HotConfig/admin API/Teams/pipeline tests, config validate, admin audit logging | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview

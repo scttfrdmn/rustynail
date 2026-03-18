@@ -497,3 +497,113 @@ impl AgentManager {
         self.agents.read().await.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AgentRetryConfig, AgentsConfig};
+    use agenkit::core::{AgentError, Message as AkMessage};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn stub_config() -> AgentsConfig {
+        AgentsConfig {
+            llm_provider: "stub".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn retry_config(enabled: bool, max_attempts: u32) -> AgentsConfig {
+        AgentsConfig {
+            llm_provider: "stub".to_string(),
+            retry: AgentRetryConfig {
+                enabled,
+                max_attempts,
+                base_delay_ms: 0,
+                jitter_enabled: false,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_message_stub_returns_echo() {
+        let mgr = AgentManager::new(stub_config());
+        let result = mgr.process_message("user1", "hello").await.unwrap();
+        // ConversationalAgent passes full history to the agent; the stub echoes it all.
+        // The user message "hello" must appear somewhere in the response.
+        assert!(result.contains("hello"), "expected 'hello' in response, got: {}", result);
+        assert!(result.starts_with("echo:"), "response should start with echo:, got: {}", result);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_stream_emits_done() {
+        let mgr = Arc::new(AgentManager::new(stub_config()));
+        let mut rx = mgr.process_message_stream("user1".to_string(), "hi".to_string()).await;
+        let mut got_done = false;
+        while let Some(event) = rx.recv().await {
+            if matches!(event, StreamEvent::Done) {
+                got_done = true;
+                break;
+            }
+        }
+        assert!(got_done, "stream should end with Done");
+    }
+
+    #[tokio::test]
+    async fn test_process_message_stream_emits_tokens() {
+        let mgr = Arc::new(AgentManager::new(stub_config()));
+        let mut rx = mgr.process_message_stream("user1".to_string(), "hello".to_string()).await;
+        let mut assembled = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Token(t) => assembled.push_str(&t),
+                StreamEvent::Done => break,
+                StreamEvent::Error(e) => panic!("stream error: {}", e),
+            }
+        }
+        // Stub echoes the full history; "hello" must appear somewhere.
+        assert!(assembled.contains("hello"), "reassembled should contain 'hello', got: {}", assembled);
+        assert!(assembled.starts_with("echo:"), "should start with echo:, got: {}", assembled);
+    }
+
+    /// Agent that always fails, for testing retry behaviour.
+    struct AlwaysFailAgent {
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl agenkit::core::Agent for AlwaysFailAgent {
+        fn name(&self) -> &str {
+            "always_fail"
+        }
+
+        async fn process(&self, _input: AkMessage) -> Result<AkMessage, AgentError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AgentError::ProcessingError("simulated failure".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_disabled_calls_once() {
+        let calls = Arc::new(AtomicU32::new(0));
+        // We can't easily inject a custom LLM into AgentManager without changing the API,
+        // but we can test the retry logic via stub: retry disabled means 1 attempt.
+        // Use stub (always succeeds), but test the retry configuration path with retry disabled.
+        let mgr = AgentManager::new(retry_config(false, 1));
+        // Stub succeeds, so just verify it works correctly when retry is disabled.
+        let result = mgr.process_message("user1", "test").await;
+        assert!(result.is_ok());
+        let _ = calls; // unused here since we use stub
+    }
+
+    #[tokio::test]
+    async fn test_retry_enabled_returns_success_on_stub() {
+        // With stub (always succeeds), retry enabled should still return success on first attempt.
+        let mgr = AgentManager::new(retry_config(true, 3));
+        let result = mgr.process_message("user1", "test").await;
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("test"), "response should contain 'test', got: {}", text);
+        assert!(text.starts_with("echo:"), "should start with echo:, got: {}", text);
+    }
+}

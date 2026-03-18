@@ -1190,3 +1190,139 @@ fn dirs_path_expand(rest: &str) -> String {
         .map(|home| format!("{}/{}", home, rest))
         .unwrap_or_else(|_| format!("/tmp/{}", rest))
 }
+
+/// Extended test entry point that exposes optional pipeline components.
+///
+/// Unlike `handle_message_for_test`, this variant lets tests control rate-limiting,
+/// deduplication, chunking, and formatting, enabling full-pipeline integration tests.
+///
+/// When `rate_limiter` and `rate_limit_config` are both `Some`, rate limiting is
+/// enforced using the supplied config.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_message_for_test_full(
+    memory: &Arc<dyn MemoryStore>,
+    agent_manager: &Arc<AgentManager>,
+    channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
+    user_prefs: &Arc<user_prefs::UserPreferences>,
+    stats: &Arc<MessageStats>,
+    message: Message,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    rate_limit_config: Option<crate::config::RateLimitConfig>,
+    deduplicator: Option<Arc<Mutex<MessageDeduplicator>>>,
+    chunker: Option<Arc<MessageChunker>>,
+    formatting_enabled: bool,
+) -> Result<()> {
+    let formatter = Arc::new(ResponseFormatter::new(formatting_enabled));
+
+    // Build a HotConfig when a rate_limit_config is provided so the rate limiter fires.
+    let hot_config = rate_limit_config.map(|rlc| {
+        Arc::new(RwLock::new(HotConfig {
+            log_level: "info".to_string(),
+            api_token: None,
+            rate_limit: rlc,
+            audit_enabled: false,
+            audit_path: String::new(),
+        }))
+    });
+
+    handle_message_inner(
+        memory,
+        &None,
+        agent_manager,
+        channels,
+        user_prefs,
+        stats,
+        message,
+        rate_limiter,
+        None,
+        hot_config,
+        deduplicator,
+        chunker,
+        formatter,
+        false,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, DeduplicationConfig,
+        GatewayConfig, McpConfig, MemoryConfig, OtelConfig, RateLimitConfig, SkillsConfig,
+        ToolsConfig,
+    };
+
+    fn test_config(log_level: &str, api_token: Option<&str>, audit_enabled: bool) -> Config {
+        Config {
+            gateway: GatewayConfig {
+                log_level: log_level.to_string(),
+                api_token: api_token.map(|s| s.to_string()),
+                http_port: 8080,
+                websocket_port: 18789,
+                rate_limit: RateLimitConfig::default(),
+                max_body_bytes: 1_048_576,
+                request_timeout_seconds: 30,
+                allowed_ws_origins: Vec::new(),
+                shutdown_timeout_seconds: 30,
+                chunking_enabled: false,
+                chunking_limits: std::collections::HashMap::new(),
+                formatting_enabled: false,
+                auto_route_attachments: false,
+                deduplication: DeduplicationConfig::default(),
+            },
+            channels: ChannelsConfig {
+                discord: None,
+                whatsapp: None,
+                telegram: None,
+                slack: None,
+                sms: None,
+                webhook: None,
+                webchat: None,
+                email: None,
+                teams: None,
+                test_channel: false,
+            },
+            agents: AgentsConfig::default(),
+            tools: ToolsConfig::default(),
+            otel: OtelConfig::default(),
+            dashboard: Default::default(),
+            memory: MemoryConfig::default(),
+            mcp: McpConfig::default(),
+            skills: SkillsConfig::default(),
+            audit: AuditConfig {
+                enabled: audit_enabled,
+                path: String::new(),
+            },
+            cron: CronConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_hotconfig_from_config() {
+        let cfg = test_config("debug", Some("tok123"), false);
+        let hc = HotConfig::from_config(&cfg);
+        assert_eq!(hc.log_level, "debug");
+        assert_eq!(hc.api_token, Some("tok123".to_string()));
+        assert!(!hc.audit_enabled);
+    }
+
+    #[test]
+    fn test_hotconfig_apply_detects_changes() {
+        let cfg = test_config("info", None, false);
+        let mut hc = HotConfig::from_config(&cfg);
+        let mut new_cfg = cfg.clone();
+        new_cfg.gateway.log_level = "debug".to_string();
+        let changed = hc.apply(&new_cfg);
+        assert!(changed.contains(&"log_level".to_string()));
+        assert_eq!(hc.log_level, "debug");
+    }
+
+    #[test]
+    fn test_hotconfig_apply_ignores_no_change() {
+        let cfg = test_config("info", None, false);
+        let mut hc = HotConfig::from_config(&cfg);
+        let changed = hc.apply(&cfg);
+        assert!(changed.is_empty());
+    }
+}

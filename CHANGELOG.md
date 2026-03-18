@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-03-18
+
+### Added
+- Rate limiter unit tests: `test_disabled_always_allows`, `test_within_window_allows`, `test_exceeds_limit_blocks`, `test_window_reset_allows_again`, `test_independent_users` (`src/gateway/rate_limiter.rs`)
+- Agent fallback unit tests: `test_primary_success_no_fallback`, `test_capacity_error_uses_fallback`, `test_non_capacity_error_not_forwarded`, `test_all_fallbacks_fail_returns_last_error` (`src/agents/fallback.rs`)
+- Agent manager unit tests: `test_process_message_stub_returns_echo`, `test_process_message_stream_emits_done`, `test_process_message_stream_emits_tokens`, `test_retry_disabled_calls_once`, `test_retry_enabled_returns_success_on_stub` (`src/agents/manager.rs`)
+- HotConfig unit tests: `test_hotconfig_from_config`, `test_hotconfig_apply_detects_changes`, `test_hotconfig_apply_ignores_no_change` (`src/gateway/mod.rs`)
+- Admin API integration tests: `test_admin_clear_memory_returns_200`, `test_admin_channels_health_returns_json`, `test_admin_skills_reload_returns_200`, `test_admin_requires_bearer_when_configured`, `test_admin_channels_health_structure` (`tests/admin_api.rs`)
+- Teams webhook HMAC integration tests: `test_teams_no_hmac_secret_accepts_any_request`, `test_teams_valid_hmac_accepted`, `test_teams_invalid_hmac_rejected`, `test_teams_missing_auth_header_rejected`, `test_teams_malformed_json_rejected` (`tests/teams_webhook.rs`)
+- Full pipeline integration tests: `test_pipeline_dedup_drops_duplicate`, `test_pipeline_multi_user_isolation`, `test_pipeline_chunking_splits_long_response`, `test_pipeline_formatting_slack_applied` (`tests/pipeline.rs`)
+- `rustynail config validate` CLI subcommand: runs preflight checks (config load, API key presence, memory backend dependencies) and exits 0 (all pass) or 1 (any failure); prints `[✓]`/`[✗]` lines for each check
+- `AuditEvent::AdminAction` variant: emitted by `admin_clear_memory_handler`, `admin_reload_skills_handler`, and `admin_channels_health_handler` with `endpoint`, optional `param`, and `success` fields
+- `handle_message_for_test_full()` public test helper in `src/gateway/mod.rs` — exposes rate-limiter, deduplicator, chunker, and formatting controls for full-pipeline integration tests
+- `make_test_state_stub()` helper in `tests/common/mod.rs` — `AppState` with stub LLM provider; no real API key required
+
+### Changed
+- `Cargo.toml` bumped to `0.13.0`
+
 ## [0.12.0] - 2026-03-18
 
 ### Added
