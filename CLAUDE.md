@@ -111,6 +111,66 @@ cargo fmt
 | `platform:telegram` | Telegram-specific work |
 | `platform:slack` | Slack-specific work |
 
+## Parity Tracking
+
+Each milestone plan **must** include a parity section that compares RustyNail against both sister projects and identifies gaps to close:
+
+- **BuckTooth** (Go): https://github.com/scttfrdmn/bucktooth
+- **OpenClaw** (reference implementation): https://github.com/scttfrdmn/openclaw
+
+### How to track parity
+
+Before drafting a milestone plan:
+1. Review the latest releases of BuckTooth and OpenClaw to identify features RustyNail is missing.
+2. List each gap with the source project (`BuckTooth`, `OpenClaw`, or `Both`) and a short description.
+3. Assign gaps to the milestone or a future one, and create GitHub issues for each.
+
+### Parity status (as of v0.8.0)
+
+| Feature area | BuckTooth | OpenClaw | Notes |
+|---|---|---|---|
+| Core gateway + HTTP | ✅ | ✅ | |
+| Discord channel | ✅ | ✅ | |
+| WhatsApp channel | ✅ | ✅ | |
+| Telegram channel (webhook + long-poll) | ✅ | ✅ | |
+| Slack channel (webhook + socket mode) | ✅ | ✅ | |
+| SMS channel (Twilio) | ✅ | ✅ | |
+| Webchat channel | ✅ | ✅ | |
+| Email channel | ✅ | ✅ | |
+| Microsoft Teams channel | ✅ | ✅ | |
+| Multi-LLM (Anthropic, OpenAI, Ollama) | ✅ | ✅ | |
+| In-memory store | ✅ | ✅ | |
+| Redis memory | ✅ | ✅ | |
+| SQLite memory | ✅ | ✅ | |
+| Postgres memory | ✅ | ✅ | |
+| Vector memory | ✅ | ✅ | |
+| Conversation summarization | ✅ | ✅ | |
+| Prometheus metrics | ✅ | ✅ | |
+| OpenTelemetry tracing | ✅ | ✅ | |
+| Grafana dashboard config | ✅ | ✅ | |
+| Web dashboard (HTTP) | ✅ | ✅ | |
+| WebSocket dashboard | ✅ | ✅ | |
+| Calculator tool | ✅ | ✅ | |
+| Formatter tool | ✅ | ✅ | |
+| Filesystem tool | ✅ | ✅ | |
+| Web search tool | ✅ | ✅ | |
+| Web fetch tool | ✅ | ✅ | |
+| Shell tool | ✅ | ✅ | |
+| Calendar tool | ✅ | ✅ | |
+| MCP server (`mcp serve`) | ✅ | ✅ | |
+| MCP client connectivity | ✅ | ✅ | |
+| Agent skills | ✅ | ✅ | |
+| Bearer token auth | ✅ | ✅ | |
+| Token/cost accounting | ✅ | ✅ | |
+| Helm chart | ✅ | ✅ | |
+| Docker / distroless image | ✅ | ✅ | |
+| CI/CD (GitHub Actions) | ✅ | ✅ | |
+| Criterion benchmarks | ✅ | — | BuckTooth has none |
+| Zero-credential test harness | ✅ | — | BuckTooth has none |
+| Shell completion | ✅ | ✅ | |
+
+Update this table at the start of each milestone planning session.
+
 ## Milestones
 
 | Milestone | Description | Status |
