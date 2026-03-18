@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-18
+
+### Added
+- Per-user sliding-window rate limiting: `RateLimiter` in `src/gateway/rate_limiter.rs` using `DashMap`; configured via `gateway.rate_limit.enabled`, `messages_per_window`, `window_seconds` (env: `RATE_LIMIT_ENABLED`, `RATE_LIMIT_MESSAGES`, `RATE_LIMIT_WINDOW_SECONDS`); off by default (backward compatible); users who exceed the limit receive a friendly warning message
+- Structured NDJSON audit logging: `AuditLogger` + `AuditEvent` in `src/audit/mod.rs`; async background writer via `mpsc::UnboundedSender`; events: `auth_rejected`, `rate_limit_hit`, `message_received`, `tool_executed`, `config_reloaded`, `agent_created`, `llm_error`; configured via `audit.enabled`, `audit.path` (env: `AUDIT_ENABLED`, `AUDIT_PATH`); off by default
+- Request body size limit: `DefaultBodyLimit::max()` applied globally (WebSocket upgrade routes exempt); configured via `gateway.max_body_bytes` (env: `GATEWAY_MAX_BODY_BYTES`; default 1 MB); returns `413 Payload Too Large` when exceeded
+- Handler timeout: `TimeoutLayer` wraps all routes via `HandleErrorLayer`; configured via `gateway.request_timeout_seconds` (env: `GATEWAY_REQUEST_TIMEOUT_SECONDS`; default 30s); returns `408 Request Timeout`
+- Security Prometheus counters: `rustynail_auth_failures_total`, `rustynail_rate_limit_hits_total`, `rustynail_llm_errors_total`, `rustynail_llm_retries_total`; exposed via `/metrics`; corresponding `record_*` methods on `MessageStats`
+- Config hot-reload via SIGHUP: `HotConfig` struct wraps hot-reloadable config subset (`log_level`, `api_token`, `rate_limit.*`, `audit.*`); `Gateway::hot_config_handle()` returns an `Arc<RwLock<HotConfig>>`; bearer auth middleware reads token from `HotConfig` at request time; SIGHUP handler in `main.rs` reloads config and logs changed field names (Unix only)
+- LLM retry with exponential backoff in `AgentManager::process_message()`: configurable via `agents.retry.enabled`, `max_attempts`, `base_delay_ms` (env: `AGENTS_RETRY_ENABLED`, `AGENTS_RETRY_MAX_ATTEMPTS`, `AGENTS_RETRY_BASE_DELAY_MS`; defaults: enabled, 3 attempts, 100 ms base); each retry increments `rustynail_llm_retries_total`; after all attempts exhausted, a friendly fallback message is returned to the user
+
+### Changed
+- `Cargo.toml` bumped to `0.9.0`
+- `GatewayConfig` extended with `rate_limit: RateLimitConfig`, `max_body_bytes: usize`, `request_timeout_seconds: u64`
+- `AgentsConfig` extended with `retry: AgentRetryConfig`
+- `Config` extended with top-level `audit: AuditConfig`
+- `AppState` and `HttpServerConfig` extended with `rate_limiter`, `audit`, `hot_config` fields
+- `create_router()` now accepts `max_body_bytes` and `request_timeout_seconds` parameters
+- `AgentManager` constructor chain extended with `with_tools_skills_and_stats()` accepting optional `Arc<MessageStats>` for retry metrics
+- Bearer auth middleware reads expected token from `HotConfig` (hot-reloadable) instead of static `AppState.api_token`
+
 ## [0.8.0] - 2026-03-18
 
 ### Added

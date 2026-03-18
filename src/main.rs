@@ -165,6 +165,36 @@ async fn cmd_start() -> Result<()> {
     info!("Gateway started successfully");
     info!("RustyNail is now running. Press Ctrl-C to shutdown.");
 
+    // Spawn SIGHUP hot-reload handler (Unix only)
+    #[cfg(unix)]
+    {
+        let hot = gateway.hot_config_handle();
+        tokio::spawn(async move {
+            use signal::unix::{signal as unix_signal, SignalKind};
+            let mut sighup = match unix_signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to register SIGHUP handler: {}", e);
+                    return;
+                }
+            };
+            loop {
+                sighup.recv().await;
+                match rustynail::config::Config::load() {
+                    Ok(new_cfg) => {
+                        let changed = hot.write().await.apply(&new_cfg);
+                        if changed.is_empty() {
+                            info!("SIGHUP: config reloaded (no hot-reloadable changes)");
+                        } else {
+                            info!("Config reloaded. Changed fields: {:?}", changed);
+                        }
+                    }
+                    Err(e) => tracing::error!("Hot-reload config parse failed: {}", e),
+                }
+            }
+        });
+    }
+
     // Wait for shutdown signal
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutdown signal received"),

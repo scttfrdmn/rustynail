@@ -1,4 +1,5 @@
 use crate::agents::AgentManager;
+use crate::audit::{AuditEvent, AuditLogger};
 use crate::channels::slack::{
     parse_event as parse_slack_event, verify_slack_signature, SlackWebhookPayload,
 };
@@ -12,26 +13,33 @@ use crate::channels::whatsapp::{parse_webhook, WebhookBody};
 use crate::channels::Channel;
 use crate::config::WebhookEndpoint;
 use crate::gateway::dashboard::{DashboardEvent, MessageStats};
+use crate::gateway::HotConfig;
+use crate::gateway::rate_limiter::RateLimiter;
 use crate::gateway::user_prefs::UserPreferences;
 use crate::types::Message;
 use axum::{
     body::Bytes,
+    error_handling::HandleErrorLayer,
     extract::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     extract::Request,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
+    BoxError,
     Router,
 };
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, RwLock};
+use tower::timeout::TimeoutLayer;
+use tower::ServiceBuilder;
 use tracing::{info, warn};
 
 /// All parameters needed to start the HTTP server in a single struct.
@@ -40,6 +48,10 @@ use tracing::{info, warn};
 /// lifetime of the process.
 pub struct HttpServerConfig {
     pub port: u16,
+    /// Maximum request body size in bytes (applies to all non-WebSocket routes).
+    pub max_body_bytes: usize,
+    /// Per-request handler timeout in seconds.
+    pub request_timeout_seconds: u64,
     pub channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
     pub agent_manager: Arc<AgentManager>,
     pub whatsapp_tx: Option<mpsc::UnboundedSender<Message>>,
@@ -64,6 +76,12 @@ pub struct HttpServerConfig {
     /// When `Some`, the `/test/send` and `/test/responses` endpoints are active
     /// and backed by this `TestChannel` handle.
     pub test_channel: Option<Arc<TestChannel>>,
+    /// Per-user rate limiter (shared with gateway message loop).
+    pub rate_limiter: Arc<RateLimiter>,
+    /// Structured audit logger (None when audit is disabled).
+    pub audit: Option<Arc<AuditLogger>>,
+    /// Hot-reloadable config (api_token, rate_limit, etc.).
+    pub hot_config: Arc<RwLock<HotConfig>>,
 }
 
 /// Axum shared state cloned into every request handler.
@@ -89,6 +107,9 @@ pub struct AppState {
     pub dashboard_expected_auth: Option<String>,
     pub api_token: Option<String>,
     pub test_channel: Option<Arc<TestChannel>>,
+    pub rate_limiter: Arc<RateLimiter>,
+    pub audit: Option<Arc<AuditLogger>>,
+    pub hot_config: Arc<RwLock<HotConfig>>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────
@@ -126,15 +147,27 @@ pub struct MetricsResponse {
 // ── Bearer token auth middleware ──────────────────────────────────────────────
 
 /// Axum middleware that enforces `Authorization: Bearer <token>` when a token
-/// is configured. Routes `/live` and `/ready` are always exempt (K8s probes).
+/// is configured.  Routes `/live` and `/ready` are always exempt (K8s probes).
+///
+/// Reads the token from `hot_config` so that SIGHUP-reloaded tokens take effect
+/// without restarting.
 pub async fn bearer_auth_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
-    let expected = match &state.api_token {
-        Some(t) if !t.is_empty() => t.as_bytes().to_vec(),
-        _ => return next.run(req).await, // auth disabled
+    // Read current token from the hot config (lock is released immediately)
+    let expected: Option<Vec<u8>> = {
+        let hot = state.hot_config.read().await;
+        match hot.api_token.as_deref() {
+            Some(t) if !t.is_empty() => Some(t.as_bytes().to_vec()),
+            _ => None,
+        }
+    };
+
+    let expected = match expected {
+        Some(e) => e,
+        None => return next.run(req).await, // auth disabled
     };
 
     // Exempt K8s probes
@@ -162,6 +195,13 @@ pub async fn bearer_auth_middleware(
         next.run(req).await
     } else {
         warn!("API auth: rejected request to {}", path);
+        state.stats.record_auth_failure();
+        if let Some(ref audit) = state.audit {
+            audit.log(AuditEvent::AuthRejected {
+                path: path.to_string(),
+                reason: "invalid_token".to_string(),
+            });
+        }
         (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer realm=\"RustyNail\"")],
@@ -808,13 +848,7 @@ async fn handle_ws_socket(mut socket: WebSocket, state: AppState) {
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
-pub fn create_router(state: AppState) -> Router {
-    let has_auth = state
-        .api_token
-        .as_deref()
-        .map(|t| !t.is_empty())
-        .unwrap_or(false);
-
+pub fn create_router(state: AppState, max_body_bytes: usize, request_timeout_seconds: u64) -> Router {
     let router = Router::new()
         // Health / observability
         .route("/health", get(health_handler))
@@ -835,8 +869,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/webhooks/:name", post(generic_webhook_receive))
         // Microsoft Teams webhook
         .route("/channels/teams/messages", post(teams_webhook_receive))
-        // Webchat
-        .route("/channels/webchat/ws", get(webchat_ws_handler))
+        // Webchat WebSocket — disable body limit (upgrade has no body)
+        .route(
+            "/channels/webchat/ws",
+            get(webchat_ws_handler).layer(DefaultBodyLimit::disable()),
+        )
         .route("/channels/webchat/widget.js", get(webchat_widget_handler))
         // User preferences
         .route("/users/:user_id/preferences", get(get_user_preferences))
@@ -850,24 +887,37 @@ pub fn create_router(state: AppState) -> Router {
             "/dashboard/data",
             get(crate::gateway::dashboard::dashboard_data_handler),
         )
-        .route("/dashboard/ws", get(dashboard_ws_handler))
+        // Dashboard WebSocket — disable body limit (upgrade has no body)
+        .route(
+            "/dashboard/ws",
+            get(dashboard_ws_handler).layer(DefaultBodyLimit::disable()),
+        )
         // Zero-credential test channel endpoints (only active when test_channel is set)
         .route("/test/send", post(test_send_handler))
-        .route("/test/responses", get(test_responses_handler));
+        .route("/test/responses", get(test_responses_handler))
+        // Apply request body limit and handler timeout globally, then bearer auth.
+        // TimeoutLayer requires HandleErrorLayer to convert BoxError → HTTP 408.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            bearer_auth_middleware,
+        ))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|_: BoxError| async {
+                    StatusCode::REQUEST_TIMEOUT
+                }))
+                .layer(TimeoutLayer::new(Duration::from_secs(request_timeout_seconds))),
+        )
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .with_state(state);
 
-    if has_auth {
-        router
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                bearer_auth_middleware,
-            ))
-            .with_state(state)
-    } else {
-        router.with_state(state)
-    }
+    router
 }
 
 pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
+    let max_body_bytes = cfg.max_body_bytes;
+    let request_timeout_seconds = cfg.request_timeout_seconds;
+
     let state = AppState {
         channels: cfg.channels,
         agent_manager: cfg.agent_manager,
@@ -889,9 +939,12 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
         dashboard_expected_auth: cfg.dashboard_expected_auth,
         api_token: cfg.api_token,
         test_channel: cfg.test_channel,
+        rate_limiter: cfg.rate_limiter,
+        audit: cfg.audit,
+        hot_config: cfg.hot_config,
     };
 
-    let app = create_router(state);
+    let app = create_router(state, max_body_bytes, request_timeout_seconds);
     let addr = format!("0.0.0.0:{}", cfg.port);
 
     info!("HTTP server starting on {}", addr);
@@ -916,9 +969,14 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     fn make_state() -> AppState {
+        use crate::config::RateLimitConfig;
+        use crate::gateway::HotConfig;
+
         AppState {
             channels: Arc::new(RwLock::new(Vec::new())),
             agent_manager: Arc::new(AgentManager::new(Default::default())),
@@ -940,12 +998,22 @@ mod tests {
             dashboard_expected_auth: None,
             api_token: None,
             test_channel: None,
+            rate_limiter: RateLimiter::new(),
+            audit: None,
+            hot_config: Arc::new(RwLock::new(HotConfig {
+                log_level: "info".to_string(),
+                api_token: None,
+                rate_limit: RateLimitConfig::default(),
+                audit_enabled: false,
+                audit_path: String::new(),
+            })),
         }
     }
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let app = create_router(make_state());
+        let state = make_state();
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()
@@ -960,7 +1028,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_whatsapp_verify_valid() {
-        let app = create_router(make_state());
+        let state = make_state();
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()
@@ -975,7 +1044,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_whatsapp_verify_invalid_token() {
-        let app = create_router(make_state());
+        let state = make_state();
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()
@@ -994,7 +1064,7 @@ mod tests {
         // Manually set a pref to test the GET
         state.user_prefs.set("alice", "whatsapp-main").await;
 
-        let app = create_router(state);
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1014,7 +1084,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sms_webhook_no_sender() {
-        let app = create_router(make_state());
+        let state = make_state();
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1031,7 +1102,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_webchat_widget_js() {
-        let app = create_router(make_state());
+        let state = make_state();
+        let app = create_router(state, 1_048_576, 30);
         let response = app
             .oneshot(
                 Request::builder()

@@ -1,11 +1,14 @@
 pub mod dashboard;
 pub mod http;
+pub mod rate_limiter;
 pub mod user_prefs;
 
 use crate::agents::AgentManager;
+use crate::audit::{AuditEvent, AuditLogger};
 use crate::channels::Channel;
-use crate::config::Config;
+use crate::config::{Config, RateLimitConfig};
 use crate::gateway::dashboard::MessageStats;
+use crate::gateway::rate_limiter::RateLimiter;
 use crate::memory::{
     InMemoryStore, MemorySummarizer, MemoryStore, PostgresStore, RedisStore, SqliteStore,
     VectorMemoryStore,
@@ -17,11 +20,75 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 use agenkit::protocols::{McpClient, McpHttpClient, McpStdioClient, mcp_tools_from_client};
 use agenkit::Tool;
 use user_prefs::UserPreferences;
+
+// ── Hot-reloadable config subset ──────────────────────────────────────────────
+
+/// Fields that can be updated at runtime via SIGHUP without restarting.
+#[derive(Debug, Clone)]
+pub struct HotConfig {
+    pub log_level: String,
+    pub api_token: Option<String>,
+    pub rate_limit: RateLimitConfig,
+    pub audit_enabled: bool,
+    pub audit_path: String,
+}
+
+impl HotConfig {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            log_level: config.gateway.log_level.clone(),
+            api_token: config.gateway.api_token.clone(),
+            rate_limit: config.gateway.rate_limit.clone(),
+            audit_enabled: config.audit.enabled,
+            audit_path: config.audit.path.clone(),
+        }
+    }
+
+    /// Apply new config values, returning the names of changed fields.
+    /// Non-hot-reloadable fields (ports, memory backend, LLM provider) are ignored
+    /// with a warning when they differ.
+    pub fn apply(&mut self, new: &Config) -> Vec<String> {
+        let mut changed = Vec::new();
+
+        if self.log_level != new.gateway.log_level {
+            self.log_level = new.gateway.log_level.clone();
+            changed.push("log_level".to_string());
+        }
+        if self.api_token != new.gateway.api_token {
+            self.api_token = new.gateway.api_token.clone();
+            changed.push("api_token".to_string());
+        }
+        if self.rate_limit.enabled != new.gateway.rate_limit.enabled {
+            self.rate_limit.enabled = new.gateway.rate_limit.enabled;
+            changed.push("rate_limit.enabled".to_string());
+        }
+        if self.rate_limit.messages_per_window != new.gateway.rate_limit.messages_per_window {
+            self.rate_limit.messages_per_window = new.gateway.rate_limit.messages_per_window;
+            changed.push("rate_limit.messages_per_window".to_string());
+        }
+        if self.rate_limit.window_seconds != new.gateway.rate_limit.window_seconds {
+            self.rate_limit.window_seconds = new.gateway.rate_limit.window_seconds;
+            changed.push("rate_limit.window_seconds".to_string());
+        }
+        if self.audit_enabled != new.audit.enabled {
+            self.audit_enabled = new.audit.enabled;
+            changed.push("audit.enabled".to_string());
+        }
+        if self.audit_path != new.audit.path {
+            self.audit_path = new.audit.path.clone();
+            changed.push("audit.path".to_string());
+        }
+
+        changed
+    }
+}
+
+// ── Gateway ───────────────────────────────────────────────────────────────────
 
 pub struct Gateway {
     config: Config,
@@ -37,6 +104,12 @@ pub struct Gateway {
     /// Sender given to webhook-based channels / HTTP server for inbound messages
     message_tx: mpsc::UnboundedSender<Message>,
     message_rx: Option<mpsc::UnboundedReceiver<Message>>,
+    /// Per-user sliding-window rate limiter.
+    rate_limiter: Arc<RateLimiter>,
+    /// Structured audit logger (None when audit is disabled).
+    audit: Option<Arc<AuditLogger>>,
+    /// Hot-reloadable config subset shared with the HTTP layer.
+    hot_config: Arc<RwLock<HotConfig>>,
 }
 
 impl Gateway {
@@ -221,12 +294,41 @@ impl Gateway {
             None
         };
 
-        let agent_manager = Arc::new(AgentManager::with_tools_and_skills(
+        let stats = MessageStats::new();
+
+        let agent_manager = Arc::new(AgentManager::with_tools_skills_and_stats(
             config.agents.clone(),
             config.tools.clone(),
             tool_registry,
             skills_context,
+            Some(stats.clone()),
         ));
+
+        // Build rate limiter
+        let rate_limiter = RateLimiter::new();
+        if config.gateway.rate_limit.enabled {
+            info!(
+                "Rate limiting enabled ({} msgs / {}s per user)",
+                config.gateway.rate_limit.messages_per_window,
+                config.gateway.rate_limit.window_seconds,
+            );
+        }
+
+        // Build audit logger
+        let audit = if config.audit.enabled {
+            let dest = if config.audit.path.is_empty() {
+                "stderr".to_string()
+            } else {
+                config.audit.path.clone()
+            };
+            info!("Audit logging enabled (dest={})", dest);
+            Some(AuditLogger::new(&config.audit))
+        } else {
+            None
+        };
+
+        // Build hot config
+        let hot_config = Arc::new(RwLock::new(HotConfig::from_config(&config)));
 
         Self {
             config,
@@ -235,12 +337,15 @@ impl Gateway {
             summarizer,
             agent_manager,
             user_prefs: Arc::new(UserPreferences::new()),
-            stats: MessageStats::new(),
+            stats,
             event_tx,
             _event_rx: event_rx,
             tasks: Vec::new(),
             message_tx,
             message_rx: Some(message_rx),
+            rate_limiter,
+            audit,
+            hot_config,
         }
     }
 
@@ -252,6 +357,11 @@ impl Gateway {
     /// Returns a reference to the user preferences store.
     pub fn user_prefs(&self) -> Arc<UserPreferences> {
         self.user_prefs.clone()
+    }
+
+    /// Returns a handle to the hot-reloadable config (for SIGHUP handler in main).
+    pub fn hot_config_handle(&self) -> Arc<RwLock<HotConfig>> {
+        self.hot_config.clone()
     }
 
     /// Register a channel with the gateway.
@@ -379,11 +489,10 @@ impl Gateway {
         // Add test channel if enabled
         let test_channel_handle = if self.config.channels.test_channel {
             info!("Setting up zero-credential test channel (POST /test/send, GET /test/responses)");
-            let tc = crate::channels::testchan::TestChannel::new("testchan-main".to_string());
             let handle = Arc::new(
                 crate::channels::testchan::TestChannel::new("testchan-main".to_string())
             );
-            let _ = tc; // registered below
+            let _ = crate::channels::testchan::TestChannel::new("testchan-main".to_string());
             self.register_channel(Box::new(
                 crate::channels::testchan::TestChannel::new("testchan-main".to_string())
             )).await;
@@ -576,6 +685,8 @@ impl Gateway {
         // Start HTTP server
         let http_cfg = http::HttpServerConfig {
             port: self.config.gateway.http_port,
+            max_body_bytes: self.config.gateway.max_body_bytes,
+            request_timeout_seconds: self.config.gateway.request_timeout_seconds,
             channels: self.channels.clone(),
             agent_manager: self.agent_manager.clone(),
             whatsapp_tx,
@@ -596,6 +707,9 @@ impl Gateway {
             dashboard_expected_auth,
             api_token: self.config.gateway.api_token.clone(),
             test_channel: test_channel_handle,
+            rate_limiter: self.rate_limiter.clone(),
+            audit: self.audit.clone(),
+            hot_config: self.hot_config.clone(),
         };
 
         let http_task = tokio::spawn(async move {
@@ -622,6 +736,9 @@ impl Gateway {
             let channels = self.channels.clone();
             let user_prefs = self.user_prefs.clone();
             let stats = self.stats.clone();
+            let rate_limiter = self.rate_limiter.clone();
+            let audit = self.audit.clone();
+            let hot_config = self.hot_config.clone();
 
             let msg_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
@@ -638,6 +755,9 @@ impl Gateway {
                         &user_prefs,
                         &stats,
                         message,
+                        Some(rate_limiter.clone()),
+                        audit.clone(),
+                        Some(hot_config.clone()),
                     )
                     .instrument(span)
                     .await
@@ -692,6 +812,9 @@ impl Gateway {
             &self.user_prefs,
             &self.stats,
             message,
+            Some(self.rate_limiter.clone()),
+            self.audit.clone(),
+            Some(self.hot_config.clone()),
         )
         .instrument(span)
         .await
@@ -707,6 +830,9 @@ impl Gateway {
 }
 
 /// Public entry point for integration tests — delegates to `handle_message_inner`.
+///
+/// The new rate-limiter and audit parameters default to disabled/absent so that
+/// existing test call-sites do not need to change.
 pub async fn handle_message_for_test(
     memory: &Arc<dyn MemoryStore>,
     agent_manager: &Arc<AgentManager>,
@@ -715,7 +841,19 @@ pub async fn handle_message_for_test(
     stats: &Arc<MessageStats>,
     message: Message,
 ) -> Result<()> {
-    handle_message_inner(memory, &None, agent_manager, channels, user_prefs, stats, message).await
+    handle_message_inner(
+        memory,
+        &None,
+        agent_manager,
+        channels,
+        user_prefs,
+        stats,
+        message,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Core message-handling logic shared between the internal loop and public method.
@@ -727,11 +865,57 @@ async fn handle_message_inner(
     user_prefs: &Arc<UserPreferences>,
     stats: &Arc<MessageStats>,
     message: Message,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    audit: Option<Arc<AuditLogger>>,
+    hot_config: Option<Arc<RwLock<HotConfig>>>,
 ) -> Result<()> {
     info!(
         "Handling message from {} in channel {}",
         message.username, message.channel_id
     );
+
+    // ── Audit: message received ───────────────────────────────────────────────
+    if let Some(ref al) = audit {
+        al.log(AuditEvent::MessageReceived {
+            user_id: message.user_id.clone(),
+            channel_id: message.channel_id.clone(),
+            bytes: message.content.len(),
+        });
+    }
+
+    // ── Per-user rate limiting ────────────────────────────────────────────────
+    if let (Some(ref rl), Some(ref hc)) = (&rate_limiter, &hot_config) {
+        let config = hc.read().await;
+        if !rl.check_and_record(&message.user_id, &config.rate_limit) {
+            warn!(
+                "Rate limit exceeded for user '{}' in channel '{}'",
+                message.user_id, message.channel_id
+            );
+            stats.record_rate_limit_hit();
+            if let Some(ref al) = audit {
+                al.log(AuditEvent::RateLimitHit {
+                    user_id: message.user_id.clone(),
+                    channel_id: message.channel_id.clone(),
+                });
+            }
+            // Send friendly rate-limit message back through the originating channel
+            let deny = Message::new(
+                message.channel_id.clone(),
+                "assistant".to_string(),
+                "RustyNail".to_string(),
+                "⚠️ Rate limit exceeded. Please wait before sending another message."
+                    .to_string(),
+            );
+            let channels = channels.read().await;
+            for channel in channels.iter() {
+                if channel.id() == message.channel_id {
+                    let _ = channel.send_message(deny).await;
+                    break;
+                }
+            }
+            return Ok(());
+        }
+    }
 
     // Resolve the channel to route the response to
     let response_channel_id = if let Some(ref preferred) = message.preferred_channel_id {
@@ -752,12 +936,26 @@ async fn handle_message_inner(
 
     stats.record_inbound_async(&message).await;
 
-    // Process with agent (record duration for Prometheus histogram)
+    // ── Process with agent ────────────────────────────────────────────────────
     let processing_start = std::time::Instant::now();
-    let response_content = agent_manager
+    let response_content = match agent_manager
         .process_message(&message.user_id, &message.content)
         .instrument(tracing::info_span!("agent.process", user_id = %message.user_id))
-        .await?;
+        .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            error!("LLM error for user '{}': {}", message.user_id, e);
+            stats.record_llm_error();
+            if let Some(ref al) = audit {
+                al.log(AuditEvent::LlmError {
+                    user_id: message.user_id.clone(),
+                    error: e.to_string(),
+                });
+            }
+            "I'm having trouble responding right now. Please try again in a moment.".to_string()
+        }
+    };
     stats.observe_message_duration(processing_start.elapsed().as_secs_f64());
 
     memory.add_message(&message.user_id, format!("Assistant: {}", response_content));

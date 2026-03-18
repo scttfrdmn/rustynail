@@ -3,47 +3,26 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
-use rustynail::agents::AgentManager;
-use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::{create_router, AppState};
-use rustynail::gateway::user_prefs::UserPreferences;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use rustynail::gateway::rate_limiter::RateLimiter;
+use rustynail::gateway::HotConfig;
+use rustynail::config::RateLimitConfig;
 use tower::ServiceExt;
 
 fn make_state_with_auth(password: &str) -> AppState {
     let encoded =
         base64::engine::general_purpose::STANDARD.encode(format!("rustynail:{}", password));
     let expected = format!("Basic {}", encoded);
-    AppState {
-        channels: Arc::new(RwLock::new(Vec::new())),
-        agent_manager: Arc::new(AgentManager::new(Default::default())),
-        whatsapp_tx: None,
-        whatsapp_verify_token: String::new(),
-        telegram_tx: None,
-        telegram_webhook_secret: String::new(),
-        slack_tx: None,
-        slack_signing_secret: String::new(),
-        sms_tx: None,
-        sms_auth_token: String::new(),
-        webhook_endpoints: Vec::new(),
-        webhook_tx: None,
-        webchat_sessions: None,
-        webchat_tx: None,
-        teams_tx: None,
-        user_prefs: Arc::new(UserPreferences::new()),
-        stats: MessageStats::new(),
-        dashboard_expected_auth: Some(expected),
-        api_token: None,
-        test_channel: None,
-    }
+    let mut state = common::make_test_state();
+    state.dashboard_expected_auth = Some(expected);
+    state
 }
 
 // ── /dashboard (HTML) ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn dashboard_html_no_auth_configured_returns_200() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -65,7 +44,7 @@ async fn dashboard_html_no_auth_configured_returns_200() {
 #[tokio::test]
 async fn dashboard_html_correct_credentials_returns_200() {
     let state = make_state_with_auth("secret");
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let creds = base64::engine::general_purpose::STANDARD.encode("rustynail:secret");
     let resp = app
         .oneshot(
@@ -83,7 +62,7 @@ async fn dashboard_html_correct_credentials_returns_200() {
 #[tokio::test]
 async fn dashboard_html_missing_auth_returns_401() {
     let state = make_state_with_auth("secret");
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -99,7 +78,7 @@ async fn dashboard_html_missing_auth_returns_401() {
 #[tokio::test]
 async fn dashboard_html_wrong_password_returns_401() {
     let state = make_state_with_auth("secret");
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let creds = base64::engine::general_purpose::STANDARD.encode("rustynail:wrongpass");
     let resp = app
         .oneshot(
@@ -118,7 +97,7 @@ async fn dashboard_html_wrong_password_returns_401() {
 
 #[tokio::test]
 async fn dashboard_data_no_auth_configured_returns_200_json() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -145,7 +124,7 @@ async fn dashboard_data_no_auth_configured_returns_200_json() {
 #[tokio::test]
 async fn dashboard_data_auth_required_without_creds_returns_401() {
     let state = make_state_with_auth("secret");
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn health_returns_200() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -22,7 +22,7 @@ async fn health_returns_200() {
 
 #[tokio::test]
 async fn health_body_contains_version() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -42,7 +42,7 @@ async fn health_body_contains_version() {
 
 #[tokio::test]
 async fn status_returns_200_with_channels_and_users() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -63,7 +63,7 @@ async fn status_returns_200_with_channels_and_users() {
 
 #[tokio::test]
 async fn metrics_returns_200() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -101,7 +101,7 @@ async fn metrics_returns_200() {
 
 #[tokio::test]
 async fn ready_returns_503_when_no_channels_running() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -116,7 +116,7 @@ async fn ready_returns_503_when_no_channels_running() {
 
 #[tokio::test]
 async fn live_returns_200() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(Request::builder().uri("/live").body(Body::empty()).unwrap())
         .await

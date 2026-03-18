@@ -18,6 +18,9 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Structured audit log configuration.
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,68 @@ pub struct GatewayConfig {
     /// Optional bearer token for API authentication (env: `GATEWAY_API_TOKEN`).
     /// When `None` or empty, auth is disabled (backward compatible).
     pub api_token: Option<String>,
+
+    /// Per-user sliding-window rate limiting.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+
+    /// Maximum request body size in bytes (default 1 MiB). Env: `GATEWAY_MAX_BODY_BYTES`.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+
+    /// Handler timeout in seconds (default 30). Env: `GATEWAY_REQUEST_TIMEOUT_SECONDS`.
+    #[serde(default = "default_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+}
+
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Enable per-user rate limiting (env: `RATE_LIMIT_ENABLED`).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum messages allowed per window (env: `RATE_LIMIT_MESSAGES`).
+    #[serde(default = "default_rate_limit_messages")]
+    pub messages_per_window: u32,
+
+    /// Sliding window size in seconds (env: `RATE_LIMIT_WINDOW_SECONDS`).
+    #[serde(default = "default_rate_limit_window_seconds")]
+    pub window_seconds: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            messages_per_window: default_rate_limit_messages(),
+            window_seconds: default_rate_limit_window_seconds(),
+        }
+    }
+}
+
+// ── Audit logging ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Enable structured audit logging (env: `AUDIT_ENABLED`).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// File path for the NDJSON audit log. Empty = write to stderr.
+    /// Env: `AUDIT_PATH`.
+    #[serde(default)]
+    pub path: String,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,6 +548,33 @@ impl Default for ToolsConfig {
     }
 }
 
+// ── LLM retry ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRetryConfig {
+    /// Enable LLM retry with exponential backoff (env: `AGENTS_RETRY_ENABLED`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of attempts including the first (env: `AGENTS_RETRY_MAX_ATTEMPTS`).
+    #[serde(default = "default_retry_max_attempts")]
+    pub max_attempts: u32,
+
+    /// Base delay in ms for the first retry (env: `AGENTS_RETRY_BASE_DELAY_MS`).
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+}
+
+impl Default for AgentRetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: default_retry_max_attempts(),
+            base_delay_ms: default_retry_base_delay_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentsConfig {
     #[serde(default = "default_llm_provider")]
@@ -512,12 +604,40 @@ pub struct AgentsConfig {
 
     /// AWS region for Bedrock. Defaults to `us-east-1`.
     pub aws_region: Option<String>,
+
+    /// LLM retry configuration.
+    #[serde(default)]
+    pub retry: AgentRetryConfig,
 }
 
 // ── Default value functions ───────────────────────────────────────────────────
 
 fn default_websocket_port() -> u16 {
     18789
+}
+
+fn default_max_body_bytes() -> usize {
+    1_048_576 // 1 MiB
+}
+
+fn default_request_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_rate_limit_messages() -> u32 {
+    20
+}
+
+fn default_rate_limit_window_seconds() -> u64 {
+    60
+}
+
+fn default_retry_max_attempts() -> u32 {
+    3
+}
+
+fn default_retry_base_delay_ms() -> u64 {
+    100
 }
 
 fn default_http_port() -> u16 {
@@ -624,6 +744,7 @@ impl Default for AgentsConfig {
             planning_max_steps: default_planning_max_steps(),
             api_base: None,
             aws_region: None,
+            retry: AgentRetryConfig::default(),
         }
     }
 }
@@ -795,6 +916,28 @@ impl Config {
                     .unwrap_or_else(default_http_port),
                 log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| default_log_level()),
                 api_token: std::env::var("GATEWAY_API_TOKEN").ok(),
+                rate_limit: RateLimitConfig {
+                    enabled: std::env::var("RATE_LIMIT_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
+                    messages_per_window: std::env::var("RATE_LIMIT_MESSAGES")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_rate_limit_messages),
+                    window_seconds: std::env::var("RATE_LIMIT_WINDOW_SECONDS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_rate_limit_window_seconds),
+                },
+                max_body_bytes: std::env::var("GATEWAY_MAX_BODY_BYTES")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_max_body_bytes),
+                request_timeout_seconds: std::env::var("GATEWAY_REQUEST_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_request_timeout_seconds),
             },
             channels: ChannelsConfig {
                 discord,
@@ -828,6 +971,20 @@ impl Config {
                     .unwrap_or_else(default_planning_max_steps),
                 api_base: std::env::var("ANTHROPIC_API_BASE").ok(),
                 aws_region: std::env::var("AWS_REGION").ok(),
+                retry: AgentRetryConfig {
+                    enabled: std::env::var("AGENTS_RETRY_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(true),
+                    max_attempts: std::env::var("AGENTS_RETRY_MAX_ATTEMPTS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_retry_max_attempts),
+                    base_delay_ms: std::env::var("AGENTS_RETRY_BASE_DELAY_MS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_retry_base_delay_ms),
+                },
             },
             tools: ToolsConfig {
                 enabled: std::env::var("TOOLS_ENABLED")
@@ -911,6 +1068,13 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_skills_max_active),
+            },
+            audit: AuditConfig {
+                enabled: std::env::var("AUDIT_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                path: std::env::var("AUDIT_PATH").unwrap_or_default(),
             },
         })
     }

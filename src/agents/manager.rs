@@ -1,4 +1,5 @@
-use crate::config::{AgentsConfig, SkillsConfig, ToolsConfig};
+use crate::config::{AgentRetryConfig, AgentsConfig, SkillsConfig, ToolsConfig};
+use crate::gateway::dashboard::MessageStats;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 
@@ -34,6 +35,10 @@ pub struct AgentManager {
     planning_agent: Option<Arc<PlanningAgent>>,
     /// Skills context appended to every new agent's system prompt (when skills are enabled).
     skills_context: Option<String>,
+    /// Prometheus / dashboard stats (optional; absent in tests).
+    stats: Option<Arc<MessageStats>>,
+    /// LLM retry configuration.
+    retry_config: AgentRetryConfig,
 }
 
 impl AgentManager {
@@ -55,6 +60,18 @@ impl AgentManager {
         registry: ToolRegistry,
         skills_context: Option<String>,
     ) -> Self {
+        Self::with_tools_skills_and_stats(config, tools_config, registry, skills_context, None)
+    }
+
+    pub fn with_tools_skills_and_stats(
+        config: AgentsConfig,
+        tools_config: ToolsConfig,
+        registry: ToolRegistry,
+        skills_context: Option<String>,
+        stats: Option<Arc<MessageStats>>,
+    ) -> Self {
+        let retry_config = config.retry.clone();
+
         let planning_agent = if config.planning_enabled {
             let anthropic_config = AnthropicConfig {
                 api_key: config.api_key.clone(),
@@ -98,6 +115,8 @@ impl AgentManager {
             tool_registry: Arc::new(RwLock::new(registry)),
             planning_agent,
             skills_context,
+            stats,
+            retry_config,
         }
     }
 
@@ -267,6 +286,10 @@ impl AgentManager {
     }
 
     /// Process a message for a specific user, maintaining per-user conversation history.
+    ///
+    /// When retry is enabled, failed LLM calls are retried with exponential backoff.
+    /// After all attempts are exhausted the error is propagated — the caller
+    /// (`handle_message_inner`) is responsible for the friendly fallback and metrics.
     pub async fn process_message(&self, user_id: &str, message: &str) -> Result<String> {
         // Route /plan commands to the planning agent
         if self.planning_agent.is_some() {
@@ -288,22 +311,52 @@ impl AgentManager {
             }
         }
 
-        // Process message with the stored agent
+        // Process message with the stored agent, with optional retry
         let agents = self.agents.read().await;
         let agent = agents.get(user_id).expect("agent was just inserted");
-
         let input = agenkit::core::Message::with_text("user", message);
-        let response = agent
-            .process(input)
-            .await
-            .map_err(|e| anyhow::anyhow!("agent error: {}", e))?;
 
-        let response_text = response
-            .content_as_str()
-            .unwrap_or("I'm sorry, I couldn't generate a response.")
-            .to_string();
+        let max_attempts = if self.retry_config.enabled {
+            self.retry_config.max_attempts.max(1)
+        } else {
+            1
+        };
 
-        Ok(response_text)
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                // Record retry metric and apply exponential backoff
+                if let Some(ref stats) = self.stats {
+                    stats.record_llm_retry();
+                }
+                let delay_ms = self.retry_config.base_delay_ms
+                    * 2u64.saturating_pow(attempt - 1);
+                tracing::warn!(
+                    "LLM attempt {}/{} for user '{}' failed, retrying in {}ms",
+                    attempt,
+                    max_attempts,
+                    user_id,
+                    delay_ms
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            match agent.process(input.clone()).await {
+                Ok(response) => {
+                    let text = response
+                        .content_as_str()
+                        .unwrap_or("I'm sorry, I couldn't generate a response.")
+                        .to_string();
+                    return Ok(text);
+                }
+                Err(e) => {
+                    last_error = Some(anyhow::anyhow!("agent error: {}", e));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all LLM attempts failed")))
     }
 
     /// Clear conversation history for a user.

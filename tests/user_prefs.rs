@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn get_preferences_unknown_user_returns_null() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -30,7 +30,7 @@ async fn set_preference_then_get_returns_value() {
     let state = common::make_test_state();
     // POST to set pref
     let set_body = serde_json::json!({ "preferred_channel_id": "whatsapp-main" });
-    let app = create_router(state.clone());
+    let app = create_router(state.clone(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -45,7 +45,7 @@ async fn set_preference_then_get_returns_value() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // GET to confirm
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -69,7 +69,7 @@ async fn update_preference_overwrites_previous_value() {
 
     // First POST
     let body1 = serde_json::json!({ "preferred_channel_id": "whatsapp-main" });
-    create_router(state.clone())
+    create_router(state.clone(), 1_048_576, 30)
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -83,7 +83,7 @@ async fn update_preference_overwrites_previous_value() {
 
     // Second POST (update)
     let body2 = serde_json::json!({ "preferred_channel_id": "telegram-main" });
-    create_router(state.clone())
+    create_router(state.clone(), 1_048_576, 30)
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -96,7 +96,7 @@ async fn update_preference_overwrites_previous_value() {
         .unwrap();
 
     // GET should return last value
-    let resp = create_router(state)
+    let resp = create_router(state, 1_048_576, 30)
         .oneshot(
             Request::builder()
                 .uri("/users/bob/preferences")

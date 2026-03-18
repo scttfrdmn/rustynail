@@ -75,6 +75,11 @@ pub struct MessageStats {
     prom_active_users: Gauge,
     prom_healthy_channels: Gauge,
     prom_message_duration: Histogram,
+    // Security counters
+    prom_auth_failures: Counter,
+    prom_rate_limit_hits: Counter,
+    prom_llm_errors: Counter,
+    prom_llm_retries: Counter,
     // Dashboard WebSocket broadcast
     event_tx: broadcast::Sender<DashboardEvent>,
 }
@@ -128,6 +133,30 @@ impl MessageStats {
         )
         .expect("histogram creation failed");
 
+        let prom_auth_failures = Counter::with_opts(Opts::new(
+            "rustynail_auth_failures_total",
+            "Total bearer auth rejections since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_rate_limit_hits = Counter::with_opts(Opts::new(
+            "rustynail_rate_limit_hits_total",
+            "Total messages blocked by the per-user rate limiter since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_llm_errors = Counter::with_opts(Opts::new(
+            "rustynail_llm_errors_total",
+            "Total LLM errors (after all retries) since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_llm_retries = Counter::with_opts(Opts::new(
+            "rustynail_llm_retries_total",
+            "Total LLM retry attempts since startup",
+        ))
+        .expect("counter creation failed");
+
         registry
             .register(Box::new(prom_messages_in.clone()))
             .expect("register failed");
@@ -149,6 +178,18 @@ impl MessageStats {
         registry
             .register(Box::new(prom_message_duration.clone()))
             .expect("register failed");
+        registry
+            .register(Box::new(prom_auth_failures.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_rate_limit_hits.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_llm_errors.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_llm_retries.clone()))
+            .expect("register failed");
 
         // Channel capacity of 256; lagged receivers will skip events gracefully.
         let (event_tx, _) = broadcast::channel(256);
@@ -169,6 +210,10 @@ impl MessageStats {
             prom_active_users,
             prom_healthy_channels,
             prom_message_duration,
+            prom_auth_failures,
+            prom_rate_limit_hits,
+            prom_llm_errors,
+            prom_llm_retries,
             event_tx,
         })
     }
@@ -229,6 +274,26 @@ impl MessageStats {
     /// Update the healthy-channels gauge (called from the metrics handler).
     pub fn set_healthy_channels(&self, n: usize) {
         self.prom_healthy_channels.set(n as f64);
+    }
+
+    /// Increment the auth-failure counter (called by bearer-auth middleware on 401).
+    pub fn record_auth_failure(&self) {
+        self.prom_auth_failures.inc();
+    }
+
+    /// Increment the rate-limit-hit counter (called when a message is rate-limited).
+    pub fn record_rate_limit_hit(&self) {
+        self.prom_rate_limit_hits.inc();
+    }
+
+    /// Increment the LLM-error counter (called after all retries are exhausted).
+    pub fn record_llm_error(&self) {
+        self.prom_llm_errors.inc();
+    }
+
+    /// Increment the LLM-retry counter (called on each retry attempt, not the first).
+    pub fn record_llm_retry(&self) {
+        self.prom_llm_retries.inc();
     }
 
     /// Gather all metric families for Prometheus encoding.

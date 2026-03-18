@@ -2,10 +2,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig, SkillsConfig};
+use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
+use rustynail::gateway::rate_limiter::RateLimiter;
 use rustynail::gateway::user_prefs::UserPreferences;
+use rustynail::gateway::HotConfig;
 use rustynail::types::{ChannelHealth, Message};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -19,6 +21,9 @@ pub fn make_test_config() -> Config {
             http_port: 18081,
             log_level: "error".to_string(),
             api_token: None,
+            rate_limit: RateLimitConfig::default(),
+            max_body_bytes: 1_048_576,
+            request_timeout_seconds: 30,
         },
         channels: ChannelsConfig {
             discord: None,
@@ -42,7 +47,18 @@ pub fn make_test_config() -> Config {
         memory: MemoryConfig::default(),
         mcp: Default::default(),
         skills: SkillsConfig::default(),
+        audit: AuditConfig::default(),
     }
+}
+
+fn default_hot_config() -> Arc<RwLock<HotConfig>> {
+    Arc::new(RwLock::new(HotConfig {
+        log_level: "error".to_string(),
+        api_token: None,
+        rate_limit: RateLimitConfig::default(),
+        audit_enabled: false,
+        audit_path: String::new(),
+    }))
 }
 
 /// AppState wired up for tests — no channels, no webhook senders.
@@ -68,6 +84,9 @@ pub fn make_test_state() -> AppState {
         dashboard_expected_auth: None,
         api_token: None,
         test_channel: None,
+        rate_limiter: RateLimiter::new(),
+        audit: None,
+        hot_config: default_hot_config(),
     }
 }
 
@@ -102,6 +121,9 @@ pub fn make_test_state_with_webhooks() -> (
         dashboard_expected_auth: None,
         api_token: None,
         test_channel: None,
+        rate_limiter: RateLimiter::new(),
+        audit: None,
+        hot_config: default_hot_config(),
     };
     (state, wa_rx, tg_rx, sl_rx)
 }

@@ -9,7 +9,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn whatsapp_verify_valid_token_returns_200() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -28,7 +28,7 @@ async fn whatsapp_verify_valid_token_returns_200() {
 
 #[tokio::test]
 async fn whatsapp_verify_wrong_token_returns_403() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let resp = app
         .oneshot(
             Request::builder()
@@ -44,7 +44,7 @@ async fn whatsapp_verify_wrong_token_returns_403() {
 #[tokio::test]
 async fn whatsapp_receive_without_sender_returns_503() {
     // make_test_state() has no whatsapp_tx
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let body = serde_json::json!({
         "object": "whatsapp_business_account",
         "entry": []
@@ -66,7 +66,7 @@ async fn whatsapp_receive_without_sender_returns_503() {
 #[tokio::test]
 async fn whatsapp_receive_with_sender_returns_200() {
     let (state, _wa_rx, _tg_rx, _sl_rx) = common::make_test_state_with_webhooks();
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let body = serde_json::json!({
         "object": "whatsapp_business_account",
         "entry": []
@@ -89,7 +89,7 @@ async fn whatsapp_receive_with_sender_returns_200() {
 
 #[tokio::test]
 async fn telegram_receive_without_sender_returns_503() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let update = serde_json::json!({
         "update_id": 1,
         "message": {
@@ -117,7 +117,7 @@ async fn telegram_receive_without_sender_returns_503() {
 #[tokio::test]
 async fn telegram_receive_with_sender_returns_200() {
     let (state, _wa_rx, _tg_rx, _sl_rx) = common::make_test_state_with_webhooks();
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let update = serde_json::json!({
         "update_id": 1,
         "message": {
@@ -146,7 +146,7 @@ async fn telegram_receive_with_sender_returns_200() {
 
 #[tokio::test]
 async fn slack_url_verification_returns_challenge() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let body = serde_json::json!({
         "type": "url_verification",
         "challenge": "my_challenge_string"
@@ -172,7 +172,7 @@ async fn slack_url_verification_returns_challenge() {
 
 #[tokio::test]
 async fn slack_event_without_sender_returns_503() {
-    let app = create_router(common::make_test_state());
+    let app = create_router(common::make_test_state(), 1_048_576, 30);
     let body = serde_json::json!({
         "type": "event_callback",
         "team_id": "T123",
@@ -202,7 +202,7 @@ async fn slack_event_without_sender_returns_503() {
 #[tokio::test]
 async fn slack_event_with_sender_returns_200() {
     let (state, _wa_rx, _tg_rx, _sl_rx) = common::make_test_state_with_webhooks();
-    let app = create_router(state);
+    let app = create_router(state, 1_048_576, 30);
     let body = serde_json::json!({
         "type": "event_callback",
         "team_id": "T123",
