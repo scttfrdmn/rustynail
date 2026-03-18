@@ -99,21 +99,28 @@ impl Tool for FileSystemTool {
         };
 
         match op {
-            "read" => {
-                match std::fs::read_to_string(&resolved) {
-                    Ok(content) => Ok(ToolResult::success(serde_json::json!({ "content": content }))),
-                    Err(e) => Ok(ToolResult::error(format!("read failed: {}", e))),
-                }
-            }
+            "read" => match std::fs::read_to_string(&resolved) {
+                Ok(content) => Ok(ToolResult::success(
+                    serde_json::json!({ "content": content }),
+                )),
+                Err(e) => Ok(ToolResult::error(format!("read failed: {}", e))),
+            },
             "write" => {
                 let content = match params.get("content").and_then(|v| v.as_str()) {
                     Some(c) => c,
-                    None => return Ok(ToolResult::error("missing required parameter 'content' for write op")),
+                    None => {
+                        return Ok(ToolResult::error(
+                            "missing required parameter 'content' for write op",
+                        ))
+                    }
                 };
                 // Create parent directories if needed
                 if let Some(parent) = resolved.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
-                        return Ok(ToolResult::error(format!("failed to create directories: {}", e)));
+                        return Ok(ToolResult::error(format!(
+                            "failed to create directories: {}",
+                            e
+                        )));
                     }
                 }
                 match std::fs::write(&resolved, content) {
@@ -123,23 +130,19 @@ impl Tool for FileSystemTool {
                     Err(e) => Ok(ToolResult::error(format!("write failed: {}", e))),
                 }
             }
-            "list" => {
-                match std::fs::read_dir(&resolved) {
-                    Ok(entries) => {
-                        let names: Vec<String> = entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.file_name().to_string_lossy().to_string())
-                            .collect();
-                        Ok(ToolResult::success(serde_json::json!({ "entries": names })))
-                    }
-                    Err(e) => Ok(ToolResult::error(format!("list failed: {}", e))),
+            "list" => match std::fs::read_dir(&resolved) {
+                Ok(entries) => {
+                    let names: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect();
+                    Ok(ToolResult::success(serde_json::json!({ "entries": names })))
                 }
-            }
-            "exists" => {
-                Ok(ToolResult::success(
-                    serde_json::json!({ "exists": resolved.exists() }),
-                ))
-            }
+                Err(e) => Ok(ToolResult::error(format!("list failed: {}", e))),
+            },
+            "exists" => Ok(ToolResult::success(
+                serde_json::json!({ "exists": resolved.exists() }),
+            )),
             unknown => Ok(ToolResult::error(format!("unknown op '{}'", unknown))),
         }
     }

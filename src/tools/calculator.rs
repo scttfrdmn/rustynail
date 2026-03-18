@@ -83,9 +83,7 @@ impl Tool for CalculatorTool {
                         a / b
                     }
                     "pow" => a.powf(b),
-                    unknown => {
-                        return Ok(ToolResult::error(format!("unknown op '{}'", unknown)))
-                    }
+                    unknown => return Ok(ToolResult::error(format!("unknown op '{}'", unknown))),
                 }
             }
         };

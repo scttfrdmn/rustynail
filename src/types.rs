@@ -90,7 +90,10 @@ impl ChannelHealth {
     }
 
     pub fn is_operational(&self) -> bool {
-        matches!(self, ChannelHealth::Healthy | ChannelHealth::Degraded { .. })
+        matches!(
+            self,
+            ChannelHealth::Healthy | ChannelHealth::Degraded { .. }
+        )
     }
 }
 

@@ -1,11 +1,16 @@
 use crate::agents::AgentManager;
-use crate::channels::Channel;
+use crate::channels::slack::{
+    parse_event as parse_slack_event, verify_slack_signature, SlackWebhookPayload,
+};
+use crate::channels::telegram::{parse_update, TelegramUpdate};
 use crate::channels::whatsapp::{parse_webhook, WebhookBody};
+use crate::channels::Channel;
 use crate::gateway::user_prefs::UserPreferences;
 use crate::types::Message;
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -22,6 +27,10 @@ pub struct AppState {
     pub agent_manager: Arc<AgentManager>,
     pub whatsapp_tx: Option<mpsc::UnboundedSender<Message>>,
     pub whatsapp_verify_token: String,
+    pub telegram_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub telegram_webhook_secret: String,
+    pub slack_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub slack_signing_secret: String,
     pub user_prefs: Arc<UserPreferences>,
 }
 
@@ -184,6 +193,107 @@ async fn whatsapp_webhook_receive(
     StatusCode::OK
 }
 
+// ── Telegram webhook handler ──────────────────────────────────────────────────
+
+async fn telegram_webhook_receive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(update): Json<TelegramUpdate>,
+) -> impl IntoResponse {
+    // Verify secret token when configured
+    if !state.telegram_webhook_secret.is_empty() {
+        let provided = headers
+            .get("x-telegram-bot-api-secret-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != state.telegram_webhook_secret {
+            warn!("Telegram webhook: invalid secret token");
+            return StatusCode::FORBIDDEN;
+        }
+    }
+
+    let tx = match &state.telegram_tx {
+        Some(tx) => tx,
+        None => {
+            warn!("Received Telegram webhook but no sender configured");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+
+    if let Some(msg) = parse_update(&update) {
+        if let Err(e) = tx.send(msg) {
+            warn!("Failed to enqueue Telegram message: {}", e);
+        }
+    }
+
+    StatusCode::OK
+}
+
+// ── Slack webhook handler ─────────────────────────────────────────────────────
+
+async fn slack_webhook_receive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Verify HMAC signature when signing secret is configured
+    if !state.slack_signing_secret.is_empty() {
+        let timestamp = headers
+            .get("x-slack-request-timestamp")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let signature = headers
+            .get("x-slack-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if let Err(e) =
+            verify_slack_signature(&state.slack_signing_secret, timestamp, &body, signature)
+        {
+            warn!("Slack webhook: signature verification failed: {}", e);
+            return (
+                StatusCode::FORBIDDEN,
+                axum::response::Response::new(axum::body::Body::empty()),
+            )
+                .into_response();
+        }
+    }
+
+    let payload: SlackWebhookPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to parse Slack webhook body: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::response::Response::new(axum::body::Body::empty()),
+            )
+                .into_response();
+        }
+    };
+
+    // Handle URL verification challenge inline
+    if let SlackWebhookPayload::UrlVerification { ref challenge } = payload {
+        let resp = serde_json::json!({ "challenge": challenge });
+        return Json(resp).into_response();
+    }
+
+    let tx = match &state.slack_tx {
+        Some(tx) => tx,
+        None => {
+            warn!("Received Slack webhook but no sender configured");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
+    if let Some(msg) = parse_slack_event(&payload) {
+        if let Err(e) = tx.send(msg) {
+            warn!("Failed to enqueue Slack message: {}", e);
+        }
+    }
+
+    StatusCode::OK.into_response()
+}
+
 // ── User preferences handlers ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,7 +311,9 @@ async fn get_user_preferences(
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     let preferred_channel_id = state.user_prefs.get(&user_id).await;
-    Json(UserPreferenceResponse { preferred_channel_id })
+    Json(UserPreferenceResponse {
+        preferred_channel_id,
+    })
 }
 
 async fn set_user_preferences(
@@ -229,12 +341,13 @@ pub fn create_router(state: AppState) -> Router {
         // WhatsApp webhooks
         .route("/webhooks/whatsapp", get(whatsapp_webhook_verify))
         .route("/webhooks/whatsapp", post(whatsapp_webhook_receive))
+        // Telegram webhook
+        .route("/webhooks/telegram", post(telegram_webhook_receive))
+        // Slack webhook
+        .route("/webhooks/slack", post(slack_webhook_receive))
         // User preferences
         .route("/users/:user_id/preferences", get(get_user_preferences))
-        .route(
-            "/users/:user_id/preferences",
-            post(set_user_preferences),
-        )
+        .route("/users/:user_id/preferences", post(set_user_preferences))
         .with_state(state)
 }
 
@@ -244,6 +357,10 @@ pub async fn start_http_server(
     agent_manager: Arc<AgentManager>,
     whatsapp_tx: Option<mpsc::UnboundedSender<Message>>,
     whatsapp_verify_token: String,
+    telegram_tx: Option<mpsc::UnboundedSender<Message>>,
+    telegram_webhook_secret: String,
+    slack_tx: Option<mpsc::UnboundedSender<Message>>,
+    slack_signing_secret: String,
     user_prefs: Arc<UserPreferences>,
 ) -> anyhow::Result<()> {
     let state = AppState {
@@ -251,6 +368,10 @@ pub async fn start_http_server(
         agent_manager,
         whatsapp_tx,
         whatsapp_verify_token,
+        telegram_tx,
+        telegram_webhook_secret,
+        slack_tx,
+        slack_signing_secret,
         user_prefs,
     };
 
@@ -283,6 +404,10 @@ mod tests {
             agent_manager: Arc::new(AgentManager::new(Default::default())),
             whatsapp_tx: None,
             whatsapp_verify_token: "test-token".to_string(),
+            telegram_tx: None,
+            telegram_webhook_secret: String::new(),
+            slack_tx: None,
+            slack_signing_secret: String::new(),
             user_prefs: Arc::new(UserPreferences::new()),
         }
     }

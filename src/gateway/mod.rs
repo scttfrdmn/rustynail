@@ -11,7 +11,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, Instrument};
 
 use agenkit::Tool;
 use user_prefs::UserPreferences;
@@ -52,6 +52,14 @@ impl Gateway {
                 let fs_tool = crate::tools::filesystem::FileSystemTool::new(root);
                 if let Err(e) = tool_registry.register(Arc::new(fs_tool)) {
                     error!("Failed to register filesystem tool: {}", e);
+                }
+            }
+
+            // Register web search tool if API key is configured
+            if let Some(ref api_key) = config.tools.web_search_api_key {
+                let ws_tool = crate::tools::web_search::WebSearchTool::new(api_key.clone());
+                if let Err(e) = tool_registry.register(Arc::new(ws_tool)) {
+                    error!("Failed to register web search tool: {}", e);
                 }
             }
         }
@@ -102,7 +110,7 @@ impl Gateway {
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting gateway");
 
-        // Add WhatsApp channel if enabled (gateway owns its lifecycle)
+        // Add WhatsApp channel if enabled
         if let Some(wa_config) = self.config.channels.whatsapp.clone() {
             if wa_config.enabled {
                 info!("Setting up WhatsApp channel");
@@ -112,6 +120,23 @@ impl Gateway {
                 );
                 self.register_channel(Box::new(wa)).await;
             }
+        }
+
+        // Add Telegram channel if enabled
+        if let Some(tg_config) = self.config.channels.telegram.clone().filter(|c| c.enabled) {
+            info!("Setting up Telegram channel");
+            let tg = crate::channels::telegram::TelegramChannel::new(
+                "telegram-main".to_string(),
+                tg_config,
+            );
+            self.register_channel(Box::new(tg)).await;
+        }
+
+        // Add Slack channel if enabled
+        if let Some(sl_config) = self.config.channels.slack.clone().filter(|c| c.enabled) {
+            info!("Setting up Slack channel");
+            let sl = crate::channels::slack::SlackChannel::new("slack-main".to_string(), sl_config);
+            self.register_channel(Box::new(sl)).await;
         }
 
         // Pass WhatsApp webhook sender to HTTP only when WhatsApp is enabled
@@ -131,6 +156,38 @@ impl Gateway {
             .map(|c| c.verify_token.clone())
             .unwrap_or_default();
 
+        let telegram_tx = self
+            .config
+            .channels
+            .telegram
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|_| self.message_tx.clone());
+
+        let telegram_webhook_secret = self
+            .config
+            .channels
+            .telegram
+            .as_ref()
+            .map(|c| c.webhook_secret.clone())
+            .unwrap_or_default();
+
+        let slack_tx = self
+            .config
+            .channels
+            .slack
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|_| self.message_tx.clone());
+
+        let slack_signing_secret = self
+            .config
+            .channels
+            .slack
+            .as_ref()
+            .map(|c| c.signing_secret.clone())
+            .unwrap_or_default();
+
         // Start HTTP server
         let http_port = self.config.gateway.http_port;
         let channels_clone = self.channels.clone();
@@ -144,6 +201,10 @@ impl Gateway {
                 agent_manager_clone,
                 whatsapp_tx,
                 whatsapp_verify_token,
+                telegram_tx,
+                telegram_webhook_secret,
+                slack_tx,
+                slack_signing_secret,
                 user_prefs_clone,
             )
             .await
@@ -171,6 +232,11 @@ impl Gateway {
 
             let msg_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
+                    let span = tracing::info_span!(
+                        "gateway.handle_message",
+                        user_id = %message.user_id,
+                        channel_id = %message.channel_id
+                    );
                     if let Err(e) = handle_message_inner(
                         &memory,
                         &agent_manager,
@@ -178,6 +244,7 @@ impl Gateway {
                         &user_prefs,
                         message,
                     )
+                    .instrument(span)
                     .await
                     {
                         error!("Error handling message: {}", e);
@@ -217,6 +284,11 @@ impl Gateway {
 
     /// Handle an incoming message (kept for external callers / tests).
     pub async fn handle_message(&self, message: Message) -> Result<()> {
+        let span = tracing::info_span!(
+            "gateway.handle_message",
+            user_id = %message.user_id,
+            channel_id = %message.channel_id
+        );
         handle_message_inner(
             &self.memory,
             &self.agent_manager,
@@ -224,6 +296,7 @@ impl Gateway {
             &self.user_prefs,
             message,
         )
+        .instrument(span)
         .await
     }
 
@@ -264,12 +337,10 @@ async fn handle_message_inner(
     // Process with agent
     let response_content = agent_manager
         .process_message(&message.user_id, &message.content)
+        .instrument(tracing::info_span!("agent.process", user_id = %message.user_id))
         .await?;
 
-    memory.add_message(
-        &message.user_id,
-        format!("Assistant: {}", response_content),
-    );
+    memory.add_message(&message.user_id, format!("Assistant: {}", response_content));
 
     // Send response to the resolved channel
     let response = Message::new(

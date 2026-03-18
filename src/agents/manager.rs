@@ -2,6 +2,7 @@ use crate::config::{AgentsConfig, ToolsConfig};
 use crate::tools::ToolRegistry;
 use agenkit::adapters::anthropic::{AnthropicAgent, AnthropicConfig};
 use agenkit::core::Agent;
+use agenkit::patterns::planning::{PlanningAgent, PlanningConfig};
 use agenkit::patterns::react::{ReActAgent, ReActConfig};
 use agenkit::patterns::{ConversationalAgent, ConversationalConfig};
 use agenkit::Tool;
@@ -17,6 +18,7 @@ pub struct AgentManager {
     tools_config: ToolsConfig,
     agents: Arc<RwLock<HashMap<String, ConversationalAgent>>>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
+    planning_agent: Option<Arc<PlanningAgent>>,
 }
 
 impl AgentManager {
@@ -29,11 +31,44 @@ impl AgentManager {
         tools_config: ToolsConfig,
         registry: ToolRegistry,
     ) -> Self {
+        let planning_agent = if config.planning_enabled {
+            let anthropic_config = AnthropicConfig {
+                api_key: config.api_key.clone(),
+                model: config.llm_model.clone(),
+                max_tokens: 1024,
+                temperature: config.temperature as f64,
+                ..Default::default()
+            };
+            let llm = Arc::new(AnthropicAgent::new(anthropic_config));
+            match PlanningAgent::new(PlanningConfig {
+                llm,
+                executor: None,
+                max_steps: config.planning_max_steps,
+                allow_replanning: false,
+                system_prompt: None,
+            }) {
+                Ok(agent) => {
+                    info!(
+                        "Planning agent created (max_steps={})",
+                        config.planning_max_steps
+                    );
+                    Some(Arc::new(agent))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create planning agent: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             tools_config,
             agents: Arc::new(RwLock::new(HashMap::new())),
             tool_registry: Arc::new(RwLock::new(registry)),
+            planning_agent,
         }
     }
 
@@ -90,8 +125,34 @@ impl AgentManager {
         .map_err(|e| anyhow::anyhow!("failed to create ConversationalAgent: {}", e))
     }
 
+    /// Process a planning task, bypassing per-user conversation history.
+    async fn process_planning_message(&self, task: &str) -> Result<String> {
+        let agent = match &self.planning_agent {
+            Some(a) => a.clone(),
+            None => return Err(anyhow::anyhow!("planning agent not configured")),
+        };
+
+        let input = agenkit::core::Message::with_text("user", task);
+        let response = agent
+            .process(input)
+            .await
+            .map_err(|e| anyhow::anyhow!("planning agent error: {}", e))?;
+
+        Ok(response
+            .content_as_str()
+            .unwrap_or("I'm sorry, I couldn't generate a plan.")
+            .to_string())
+    }
+
     /// Process a message for a specific user, maintaining per-user conversation history.
     pub async fn process_message(&self, user_id: &str, message: &str) -> Result<String> {
+        // Route /plan commands to the planning agent
+        if self.planning_agent.is_some() {
+            if let Some(task) = message.strip_prefix("/plan ") {
+                return self.process_planning_message(task).await;
+            }
+        }
+
         // Check if agent exists under a read lock first
         {
             let agents = self.agents.read().await;

@@ -79,7 +79,11 @@ impl Channel for WhatsAppChannel {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             error!("WhatsApp API error {}: {}", status, text);
-            return Err(anyhow::anyhow!("WhatsApp API returned {}: {}", status, text));
+            return Err(anyhow::anyhow!(
+                "WhatsApp API returned {}: {}",
+                status,
+                text
+            ));
         }
 
         Ok(())
@@ -147,10 +151,7 @@ pub struct WebhookText {
 }
 
 /// Extract zero or more `Message` values from a raw WhatsApp webhook payload.
-pub fn parse_webhook(
-    channel_id: &str,
-    body: &WebhookBody,
-) -> Vec<Message> {
+pub fn parse_webhook(channel_id: &str, body: &WebhookBody) -> Vec<Message> {
     let mut messages = Vec::new();
 
     for entry in &body.entry {
@@ -175,12 +176,7 @@ pub fn parse_webhook(
                         .map(|c| c.profile.name.clone())
                         .unwrap_or_else(|| wmsg.from.clone());
 
-                    messages.push(Message::new(
-                        channel_id,
-                        wmsg.from.clone(),
-                        username,
-                        text,
-                    ));
+                    messages.push(Message::new(channel_id, wmsg.from.clone(), username, text));
                 }
             }
         }

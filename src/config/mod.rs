@@ -8,6 +8,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub otel: OtelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,8 @@ pub struct GatewayConfig {
 pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     pub whatsapp: Option<WhatsAppConfig>,
+    pub telegram: Option<TelegramConfig>,
+    pub slack: Option<SlackConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +61,47 @@ pub struct WhatsAppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub bot_token: String,
+
+    #[serde(default)]
+    pub webhook_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub bot_token: String,
+
+    #[serde(default)]
+    pub signing_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtelConfig {
+    pub endpoint: Option<String>,
+
+    #[serde(default = "default_otel_service_name")]
+    pub service_name: String,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            service_name: default_otel_service_name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -65,6 +110,8 @@ pub struct ToolsConfig {
     pub max_steps: usize,
 
     pub filesystem_root: Option<String>,
+
+    pub web_search_api_key: Option<String>,
 }
 
 impl Default for ToolsConfig {
@@ -73,6 +120,7 @@ impl Default for ToolsConfig {
             enabled: false,
             max_steps: default_max_steps(),
             filesystem_root: None,
+            web_search_api_key: None,
         }
     }
 }
@@ -92,6 +140,12 @@ pub struct AgentsConfig {
 
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+
+    #[serde(default)]
+    pub planning_enabled: bool,
+
+    #[serde(default = "default_planning_max_steps")]
+    pub planning_max_steps: usize,
 }
 
 // Default values
@@ -131,6 +185,14 @@ fn default_max_steps() -> usize {
     10
 }
 
+fn default_otel_service_name() -> String {
+    "rustynail".to_string()
+}
+
+fn default_planning_max_steps() -> usize {
+    10
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -139,6 +201,8 @@ impl Default for AgentsConfig {
             api_key: String::new(),
             max_history: default_max_history(),
             temperature: default_temperature(),
+            planning_enabled: false,
+            planning_max_steps: default_planning_max_steps(),
         }
     }
 }
@@ -183,6 +247,32 @@ impl Config {
             None
         };
 
+        let telegram = if let (Ok(bot_token), Ok(webhook_secret)) = (
+            std::env::var("TELEGRAM_BOT_TOKEN"),
+            std::env::var("TELEGRAM_WEBHOOK_SECRET"),
+        ) {
+            Some(TelegramConfig {
+                enabled: true,
+                bot_token,
+                webhook_secret,
+            })
+        } else {
+            None
+        };
+
+        let slack = if let (Ok(bot_token), Ok(signing_secret)) = (
+            std::env::var("SLACK_BOT_TOKEN"),
+            std::env::var("SLACK_SIGNING_SECRET"),
+        ) {
+            Some(SlackConfig {
+                enabled: true,
+                bot_token,
+                signing_secret,
+            })
+        } else {
+            None
+        };
+
         Ok(Config {
             gateway: GatewayConfig {
                 websocket_port: std::env::var("GATEWAY_WEBSOCKET_PORT")
@@ -203,6 +293,8 @@ impl Config {
                     },
                 }),
                 whatsapp,
+                telegram,
+                slack,
             },
             agents: AgentsConfig {
                 llm_provider: default_llm_provider(),
@@ -210,6 +302,14 @@ impl Config {
                 api_key,
                 max_history: default_max_history(),
                 temperature: default_temperature(),
+                planning_enabled: std::env::var("AGENTS_PLANNING_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                planning_max_steps: std::env::var("AGENTS_PLANNING_MAX_STEPS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_planning_max_steps),
             },
             tools: ToolsConfig {
                 enabled: std::env::var("TOOLS_ENABLED")
@@ -221,6 +321,12 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_max_steps),
                 filesystem_root: std::env::var("TOOLS_FILESYSTEM_ROOT").ok(),
+                web_search_api_key: std::env::var("TAVILY_API_KEY").ok(),
+            },
+            otel: OtelConfig {
+                endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
+                service_name: std::env::var("OTEL_SERVICE_NAME")
+                    .unwrap_or_else(|_| default_otel_service_name()),
             },
         })
     }
