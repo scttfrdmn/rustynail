@@ -2,357 +2,269 @@
 
 **"Rust Never Sleeps!"**
 
-RustyNail is a high-performance personal AI assistant built with Rust and Agenkit-Rust. It connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact with it naturally through chat.
-
-[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.4.0)
+[![Version](https://img.shields.io/badge/version-0.13.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.13.0)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-yellow)](https://github.com/scttfrdmn/rustynail)
+[![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/scttfrdmn/rustynail)
+[![CI](https://github.com/scttfrdmn/rustynail/actions/workflows/ci.yml/badge.svg)](https://github.com/scttfrdmn/rustynail/actions/workflows/ci.yml)
+
+RustyNail is a high-performance AI gateway built with Rust. It connects 12 messaging platforms to multiple LLM providers through a single statically-linked binary. Users interact naturally through their chat platform of choice; RustyNail handles routing, memory, tools, and response formatting.
+
+## What Is RustyNail?
+
+RustyNail is a single-binary Rust AI gateway that:
+
+- Routes messages from **12 channels** (Discord, WhatsApp, Telegram, Slack, SMS, Teams, Email, Webchat, and more) to an AI backend
+- Supports **7 LLM providers** (Anthropic, OpenAI, Ollama, Gemini, AWS Bedrock, LiteLLM, OpenAI-compat)
+- Maintains **per-user conversation memory** across 5 backends (in-memory, Redis, SQLite, Postgres, vector)
+- Runs a **tool registry** (calculator, web search, web fetch, filesystem, PDF/image analysis, shell, calendar)
+- Exposes an **Admin API**, **cron scheduler**, **agent skills**, and an **OpenAI-compatible `/v1/chat/completions`** endpoint
+- Ships as a **distroless Docker image** (~8 MB) with <30 MB RAM idle and <1 ms gateway overhead
+
+Sister project: [BuckTooth](https://github.com/scttfrdmn/bucktooth) (Go implementation). Reference implementation: [OpenClaw](https://github.com/scttfrdmn/openclaw).
 
 ## Features
 
-- **Multi-Channel Support**: Discord (Phase 1), WhatsApp, Telegram, Slack (coming soon)
-- **Conversational AI**: Powered by Claude via Agenkit-Rust
-- **Memory**: Maintains conversation context across channels
-- **Performance**: Built with Rust for maximum speed and safety
-- **Production-Ready**: Built-in observability, metrics, and health checks
-- **Single Binary**: Easy deployment with minimal dependencies
+### Channels (12)
+
+| Channel | Mode | Auth |
+|---------|------|------|
+| Discord | Gateway (serenity) | Bot token |
+| WhatsApp | Webhook (Meta Cloud API) | Phone number ID + access token |
+| Telegram | Webhook | Bot token + secret header |
+| Telegram | Long-poll | Bot token (no public URL) |
+| Slack | Events API webhook | Signing secret |
+| Slack | Socket Mode | App-level token (`xapp-`) |
+| SMS / Twilio | TwiML webhook | Account SID + auth token |
+| Microsoft Teams | Bot Framework webhook | App ID + password + optional HMAC |
+| Email | IMAP + SMTP | Host + credentials |
+| Webchat | WebSocket | Optional CORS origins |
+| Generic Webhook | HTTP POST | Optional HMAC-SHA256 |
+| Test Channel | HTTP inject/drain | None (dev/test only) |
+
+See [docs/channels.md](docs/channels.md) for per-channel setup instructions.
+
+### LLM Providers (7)
+
+`anthropic` · `openai` · `ollama` · `gemini` · `bedrock` · `litellm` · `openai-compat`
+
+Configurable retry with exponential backoff + jitter, and a provider fallback chain for capacity errors.
+
+### Memory Backends (5)
+
+`inmemory` · `redis` · `sqlite` · `postgres` · `vector` (temporal decay + half-life scoring)
+
+Automatic conversation summarization when history exceeds a message count or token budget threshold.
+
+### Tools
+
+calculator · web search (Tavily) · web fetch · filesystem · PDF analysis · image analysis · shell · calendar · formatter
+
+### Production Features
+
+- **MCP**: expose tools via `rustynail mcp serve` (stdio); consume external MCP servers
+- **Admin API**: clear user memory, reload skills, inspect channel health
+- **Cron scheduler**: fire synthetic messages on configurable intervals
+- **Agent skills**: inject SKILL.md context files into agent system prompts
+- **OpenAI-compatible endpoint**: `POST /v1/chat/completions` (non-streaming + SSE)
+- **Prometheus metrics** + **OpenTelemetry tracing** + **Grafana dashboard config**
+- **Web dashboard** with WebSocket live updates
+- **SIGHUP hot-reload**: update log level, API token, rate limits, audit config without restart
+- **Bearer token auth**, per-user rate limiting, request body limits, handler timeouts
+- **Structured NDJSON audit log**
 
 ## Quick Start
 
-### Prerequisites
-
-- Rust 1.75 or higher
-- Discord bot token (get from [Discord Developer Portal](https://discord.com/developers/applications))
-- Anthropic API key (get from [Anthropic Console](https://console.anthropic.com))
-
-### Installation
+**Prerequisites:** Rust 1.75+, an Anthropic API key (or other provider).
 
 ```bash
-# Clone the repository
+# 1. Clone and build
 git clone https://github.com/scttfrdmn/rustynail.git
 cd rustynail
-
-# Build
 cargo build --release
 
-# Or run directly
-cargo run
+# 2. Set the required environment variable
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Start (env-vars only — no channels except test channel)
+./target/release/rustynail
+
+# 4. Or start with a config file
+CONFIG_FILE=config.yaml ./target/release/rustynail
+
+# 5. Verify
+curl http://localhost:8080/health
+# {"status":"ok","version":"0.13.0"}
 ```
 
-### Configuration
-
-Create a `.env` file or export environment variables:
-
-```bash
-export DISCORD_BOT_TOKEN=your_discord_bot_token
-export ANTHROPIC_API_KEY=your_anthropic_api_key
-```
-
-Or create a configuration file:
+**Minimal `config.yaml`:**
 
 ```yaml
-# config.yaml
 gateway:
-  websocket_port: 18789
   http_port: 8080
+  websocket_port: 18789
   log_level: info
-
-channels:
-  discord:
-    enabled: true
-    auth:
-      token: ${DISCORD_BOT_TOKEN}
 
 agents:
   llm_provider: anthropic
   llm_model: claude-3-5-sonnet-20241022
   api_key: ${ANTHROPIC_API_KEY}
   max_history: 20
-  temperature: 0.7
 ```
 
-### Running
+See [docs/configuration.md](docs/configuration.md) for the complete configuration reference.
+
+## Channels
+
+See [docs/channels.md](docs/channels.md) for per-channel prerequisites, credential steps, config snippets, and webhook verification.
+
+## Deployment
 
 ```bash
-# Using environment variables
-./target/release/rustynail
+# Docker (pre-built)
+docker pull ghcr.io/scttfrdmn/rustynail:latest
+docker run --rm -e ANTHROPIC_API_KEY=... -p 8080:8080 ghcr.io/scttfrdmn/rustynail:latest
 
-# Using config file
-CONFIG_FILE=config.yaml ./target/release/rustynail
-
-# With custom log level
-RUST_LOG=debug cargo run
+# Docker Compose (build context must be the parent directory for agenkit)
+cd ..
+ANTHROPIC_API_KEY=... docker-compose -f rustynail/docker-compose.yml up
 ```
 
-## Usage
+See [docs/deployment.md](docs/deployment.md) for the Docker Compose setup, Helm/Kubernetes runbook, environment variable cheat sheet, Prometheus/Grafana integration, and production checklist.
 
-1. Invite your Discord bot to a server
-2. Start RustyNail
-3. Send a message to the bot in Discord
-4. The bot will respond using Claude AI with conversation memory
+## HTTP API
 
-## HTTP Endpoints
+| Group | Routes |
+|-------|--------|
+| Health & probes | `GET /health` `/ready` `/live` `/status` `/metrics` |
+| Dashboard | `GET /dashboard` `/dashboard/data` `GET /dashboard/ws` (WebSocket) |
+| Channel webhooks | `POST /webhooks/whatsapp` `/webhooks/telegram` `/webhooks/slack` `/webhooks/sms` `/webhooks/teams` `/webhooks/:name` |
+| Webchat | `GET /channels/webchat/ws` (WebSocket) `/channels/webchat/widget.js` |
+| Admin | `DELETE /admin/memory/:user_id` `POST /admin/skills/reload` `GET /admin/channels/health` |
+| Cron | `GET /cron/jobs` |
+| User preferences | `GET /users/:id/preferences` `POST /users/:id/preferences` |
+| OpenAI-compat | `POST /v1/chat/completions` |
+| Test channel | `POST /test/send` `GET /test/responses` |
 
-RustyNail provides comprehensive health and monitoring endpoints:
+See [docs/api.md](docs/api.md) for the complete HTTP API reference including request/response schemas.
 
-- **`GET /health`** - Basic health check (for load balancers)
-  ```json
-  {"status": "ok", "version": "0.1.0"}
-  ```
+## CLI
 
-- **`GET /status`** - Detailed system status
-  ```json
-  {
-    "status": "running",
-    "version": "0.1.0",
-    "channels": [...],
-    "active_users": 42
-  }
-  ```
-
-- **`GET /metrics`** - Operational metrics (Prometheus-compatible)
-  ```json
-  {
-    "active_users": 42,
-    "channels_count": 1,
-    "healthy_channels": 1
-  }
-  ```
-
-- **`GET /ready`** - Readiness probe (returns 503 if not ready)
-- **`GET /live`** - Liveness probe (for Kubernetes)
-- **`GET /dashboard`** - Web monitoring dashboard (HTML)
-- **`GET /dashboard/data`** - Dashboard JSON data endpoint
-
-### Dashboard
-
-The web dashboard provides real-time monitoring at `http://localhost:8080/dashboard`:
-
-- Message counters (in/out), active users, uptime, message rate
-- Channel health table with running status
-- Recent messages ring buffer (last 50)
-
-Optional basic auth — set `DASHBOARD_AUTH_PASSWORD` to require a password:
-
-```bash
-DASHBOARD_AUTH_PASSWORD=secret cargo run
-# Credentials: rustynail / <password>
+```
+rustynail start                     # Start the gateway (default)
+rustynail status [--port N]         # Query a running instance
+rustynail version                   # Print version and build info
+rustynail config check              # Load config and print summary
+rustynail config validate           # Preflight checks; exits 0/1
+rustynail completions <shell>       # Print shell completion script
+rustynail mcp serve                 # Expose tools as MCP server (stdio)
 ```
 
-### Testing Endpoints
-
-```bash
-# Test all endpoints
-./test-health.sh
-
-# Or individually
-curl http://localhost:8080/health
-curl http://localhost:8080/status
-curl http://localhost:8080/metrics
-```
+See [docs/cli.md](docs/cli.md) for the full CLI reference.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  RustyNail Gateway (Single Binary)                        │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │ HTTP Server (Axum) - Port 8080                  │   │
-│  │ ├─ /health  - Health check                      │   │
-│  │ ├─ /status  - Detailed status                   │   │
-│  │ ├─ /metrics - Operational metrics               │   │
-│  │ ├─ /ready   - Readiness probe (K8s)             │   │
-│  │ └─ /live    - Liveness probe (K8s)              │   │
-│  └─────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │ Gateway Core                                     │   │
-│  │ - Channel Registry & Lifecycle                  │   │
-│  │ - Message Router & Event Bus                    │   │
-│  │ - Agent Manager (Per-User)                      │   │
-│  └─────────────────────────────────────────────────┘   │
-│           │                                             │
-│  ┌────────┴────────┬──────────┬──────────┐            │
-│  │ Discord Channel │ WhatsApp │ Telegram │ Slack...   │
-│  └────────┬────────┴──────────┴──────────┘            │
-│           │                                             │
-│  ┌────────▼────────────────────────────────────────┐  │
-│  │ Agent Manager (Per-User ConversationalAgents)   │  │
-│  │ - Anthropic Claude 3.5 Sonnet                   │  │
-│  │ - Agenkit-Rust Integration                      │  │
-│  └────────┬────────────────────────────────────────┘  │
-│           │                                             │
-│  ┌────────▼────────────────────────────────────────┐  │
-│  │ Memory Store (In-Memory)                         │  │
-│  └──────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  RustyNail Gateway (Single Binary)                                       │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  HTTP Server (Axum :8080)                                         │  │
+│  │  /health /ready /live /status /metrics  ← Health & observability  │  │
+│  │  /dashboard /dashboard/ws               ← Web dashboard (WS push) │  │
+│  │  /webhooks/*  /channels/webchat/ws      ← Inbound channel hooks   │  │
+│  │  /admin/*  /cron/*  /users/*            ← Admin & management      │  │
+│  │  /v1/chat/completions                   ← OpenAI-compat SSE       │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Message Pipeline                                                  │  │
+│  │  Dedup → Audit → Rate limit → Attachment route →                  │  │
+│  │  Memory write → Summarize (async) → Agent (retry+fallback) →      │  │
+│  │  Format → Chunk → Channel send                                    │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────┐  ┌──────────────────┐  ┌───────────────────────────┐  │
+│  │  Channels  │  │  Agent Manager   │  │  Memory Backends           │  │
+│  │  Discord   │  │  Per-user        │  │  inmemory / redis          │  │
+│  │  WhatsApp  │  │  Conversational  │  │  sqlite / postgres         │  │
+│  │  Telegram  │  │  Agents          │  │  vector (temporal decay)   │  │
+│  │  Slack     │  │  Multi-LLM       │  └───────────────────────────┘  │
+│  │  SMS       │  │  7 providers     │                                   │
+│  │  Teams     │  └──────────────────┘  ┌───────────────────────────┐  │
+│  │  Email     │                         │  Tool Registry             │  │
+│  │  Webchat   │  ┌──────────────────┐  │  calculator / web-search   │  │
+│  │  Webhook   │  │  MCP             │  │  web-fetch / filesystem    │  │
+│  │  + Test    │  │  Server (stdio)  │  │  pdf / image / shell       │  │
+│  └────────────┘  │  Client          │  │  calendar / formatter      │  │
+│                  └──────────────────┘  └───────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+See [docs/architecture.md](docs/architecture.md) for a deep-dive into the message pipeline, channel adapter pattern, memory backend internals, hot-reload mechanics, and observability coverage.
 
 ## Development
 
-### Project Structure
-
-```
-rustynail/
-├── src/
-│   ├── main.rs              # Application entry point
-│   ├── lib.rs               # Library root
-│   ├── types.rs             # Core types and enums
-│   ├── config/              # Configuration management
-│   ├── gateway/             # Gateway implementation
-│   ├── channels/            # Channel adapters (Discord, etc.)
-│   ├── memory/              # Memory management
-│   └── agents/              # Agent configurations
-├── diary/                   # Development diary (not in git)
-├── Cargo.toml               # Rust dependencies
-└── README.md                # This file
-```
-
-## Container Deployment
-
-The build context must be the **parent** directory of `rustynail/` because `agenkit` is a local
-path dependency at `../agenkit/agenkit-rust`.
-
-### Docker (manual)
-
 ```bash
-# Build from the parent directory
-docker buildx build -f rustynail/Dockerfile -t rustynail:latest ..
+cargo build           # Debug build
+cargo build --release # Release build
+cargo test            # Run all 138+ tests
+cargo test -- --nocapture  # With output
+cargo clippy          # Lint
+cargo fmt             # Format
 
-# Run
-docker run --rm \
-  -e DISCORD_BOT_TOKEN=... \
-  -e ANTHROPIC_API_KEY=... \
-  -p 8080:8080 \
-  rustynail:latest
+# Zero-credential integration tests (test channel)
+RUST_LOG=debug CONFIG_FILE=configs/harness.yaml cargo run
+curl -X POST http://localhost:8080/test/send \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"u1","content":"hello"}'
+curl http://localhost:8080/test/responses
 ```
 
-### docker-compose
-
-```bash
-# From the parent directory (one level above rustynail/)
-cd ..
-DISCORD_BOT_TOKEN=... ANTHROPIC_API_KEY=... docker-compose -f rustynail/docker-compose.yml up
-```
-
-A pre-built image is published to GitHub Container Registry on every version tag:
-
-```bash
-docker pull ghcr.io/scttfrdmn/rustynail:latest
-```
-
-### Development
-
-```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Build with all optimizations
-cargo build --release --features production
-```
-
-### Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run tests with output
-cargo test -- --nocapture
-
-# Run specific test
-cargo test test_name
-```
-
-## Roadmap
-
-### Phase 1: Foundation ✅ (95% Complete)
-- [x] Project setup
-- [x] Core types and traits
-- [x] Configuration system
-- [x] Memory store
-- [x] Discord channel
-- [x] Agenkit integration (Claude 3.5 Sonnet)
-- [x] Per-user conversation agents
-- [x] HTTP health & metrics endpoints
-- [ ] End-to-end testing
-
-### Phase 2: Tools & Multi-Channel
-- [ ] Tool registry
-- [ ] Calculator, Message, FileSystem tools
-- [ ] WhatsApp channel
-- [ ] Cross-channel messaging
-
-### Phase 3: Expansion
-- [ ] Telegram channel
-- [ ] Slack channel
-- [ ] Planning agent
-- [ ] Calendar & Web Search tools
-- [ ] OpenTelemetry tracing
-
-### Phase 4: Polish
-- [ ] Web dashboard
-- [ ] Enhanced CLI
-- [ ] Docker image
-- [ ] Kubernetes manifests
-- [ ] Migration tool from OpenClaw
+**Criterion benchmarks** are in `benches/gateway_benchmarks.rs` — run with `cargo bench`.
 
 ## Performance
 
-Expected performance characteristics:
-
-- **Binary Size**: ~5-10 MB (optimized release)
-- **Memory Usage**: ~20-30 MB base + 1 MB per agent
-- **CPU Usage**: <0.5% idle, <3% under load
-- **Latency**: <1ms overhead
+- **Binary size**: ~8 MB (distroless release)
+- **RAM idle**: <30 MB base + ~1 MB per active agent
+- **CPU idle**: <0.5%
+- **Gateway overhead**: <1 ms
 - **Throughput**: 10,000+ messages/second
 
-Compared to BuckTooth (Go):
-- **Binary Size**: ~50% smaller
-- **Memory**: ~40% less
-- **Performance**: Similar or better
-- **Safety**: Compile-time guarantees
+Compared to BuckTooth (Go): ~50% smaller binary, ~40% less memory, similar or better throughput with compile-time safety guarantees.
+
+Criterion benchmark suite: `benches/gateway_benchmarks.rs` (`bench_inmemory_store_add`, `bench_config_load`, `bench_message_stats_record`).
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
+Contributions are welcome. Please open an issue or submit a pull request.
+
+- All work tracked on [GitHub Issues](https://github.com/scttfrdmn/rustynail/issues)
+- Follow [Conventional Commits](https://www.conventionalcommits.org/)
+- Run `cargo fmt` and `cargo clippy` before submitting
+
+## Sister Projects
+
+| Project | Language | Repo |
+|---------|----------|------|
+| BuckTooth | Go | https://github.com/scttfrdmn/bucktooth |
+| OpenClaw | Reference | https://github.com/scttfrdmn/openclaw |
+| Agenkit | Rust SDK | https://github.com/scttfrdmn/agenkit |
 
 ## Versioning
 
-This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+Follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Pre-1.0 minor bumps (`0.X.0`) may include breaking changes.
 
-Current version: **0.1.0** (Alpha)
+Current version: **0.13.0 (Beta)**
 
-See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## License
 
 Copyright 2026 Scott Friedman
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-See [LICENSE](LICENSE) for the full license text.
-
-## Acknowledgments
-
-- Built with [Agenkit-Rust](https://github.com/scttfrdmn/agenkit)
-- Inspired by [OpenClaw](https://github.com/openclaw/openclaw)
-- Sister project: [BuckTooth](https://github.com/scttfrdmn/bucktooth) (Go implementation)
-- Powered by [Anthropic Claude](https://www.anthropic.com)
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
 
 ## Why "RustyNail"?
 
-A rusty nail is strong, enduring, and gets the job done. Plus, Rust + Nail = RustyNail! 🦀🔨
+A rusty nail is strong, enduring, and gets the job done. Rust + Nail = RustyNail. 🦀🔨

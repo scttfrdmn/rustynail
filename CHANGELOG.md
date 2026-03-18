@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-03-18
+
+### Added
+- `docs/configuration.md`: complete field-by-field configuration reference for all 11 top-level config sections (`gateway`, `channels`, `agents`, `memory`, `tools`, `skills`, `audit`, `cron`, `mcp`, `otel`, `dashboard`); includes env var table, YAML examples, and per-backend subsections
+- `docs/deployment.md`: operator runbook covering Docker pre-built image, Docker Compose (with agenkit build-context note), Kubernetes via Helm, full environment variable cheat sheet, health check + K8s probe YAML, Prometheus/Grafana integration, SIGHUP hot-reload procedure, and production checklist
+- `docs/channels.md`: per-channel setup guide for all 12 channels (Discord, WhatsApp, Telegram webhook+longpoll, Slack webhook+socket, SMS/Twilio, Teams, Email, Webchat, Generic Webhook, Test Channel); each section includes prerequisites, credential steps, minimal config snippet, webhook URLs, and caveats
+- `docs/cli.md`: man-page style reference for all 7 CLI subcommands (`start`, `status`, `version`, `config check`, `config validate`, `completions`, `mcp serve`); includes option tables, exit codes, and example output
+- `docs/api.md`: complete HTTP API reference for all route groups (health/probes, dashboard, channel webhooks, webchat, admin, cron, user preferences, OpenAI-compat, test channel); includes request/response schemas and curl examples
+- `docs/architecture.md`: architecture deep-dive with updated ASCII diagram (12 channels, 5 memory backends, tool registry, MCP); 8-stage message pipeline documentation; channel adapter pattern; agent manager internals; memory backend comparison; hot-reload mechanics; full observability coverage; source map table
+- `docs/troubleshooting.md`: troubleshooting guide covering startup failures, per-channel issues, no-response debugging steps, memory backend errors, performance tuning, and useful debug commands
+
+### Changed
+- `README.md`: complete overhaul from v0.4.0 baseline; updated badges to v0.13.0 beta; rewrote Features section to reflect current reality (12 channels, 7 LLM providers, 5 memory backends, full tool registry); updated Quick Start, Channels, Deployment, HTTP API, CLI, and Architecture sections; replaced stale Roadmap section with Sister Projects table; fixed version references from "0.1.0 Alpha" to "0.13.0 Beta"
+
 ## [0.13.0] - 2026-03-18
 
 ### Added
@@ -277,7 +291,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/scttfrdmn/rustynail/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/scttfrdmn/rustynail/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/rustynail/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/rustynail/compare/v0.10.0...v0.11.0
