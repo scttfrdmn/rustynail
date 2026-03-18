@@ -1,0 +1,13 @@
+gateway:
+  http_port: 18081
+  websocket_port: 18789
+  log_level: error
+
+channels: {}
+
+agents:
+  llm_provider: anthropic
+  llm_model: claude-3-5-sonnet-20241022
+  api_key: test_key_unused
+  max_history: 5
+  temperature: 0.7

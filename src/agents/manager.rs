@@ -41,6 +41,10 @@ impl AgentManager {
                 model: config.llm_model.clone(),
                 max_tokens: 1024,
                 temperature: config.temperature as f64,
+                api_base: config
+                    .api_base
+                    .clone()
+                    .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
                 ..Default::default()
             };
             let llm = Arc::new(AnthropicAgent::new(anthropic_config));
@@ -89,6 +93,11 @@ impl AgentManager {
             model: self.config.llm_model.clone(),
             max_tokens: 1024,
             temperature: self.config.temperature as f64,
+            api_base: self
+                .config
+                .api_base
+                .clone()
+                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
             ..Default::default()
         };
 

@@ -53,3 +53,5 @@ jobs:
       - name: Run tests
         working-directory: rustynail
         run: cargo test
+        env:
+          ANTHROPIC_API_KEY: test_unused

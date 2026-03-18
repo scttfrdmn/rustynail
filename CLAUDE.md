@@ -118,7 +118,8 @@ cargo fmt
 | v0.1.0 | Foundation — core types, Discord, Agenkit, HTTP | Closed (released 2026-02-01) |
 | v0.2.0 | Tools & Multi-Channel — tool registry, WhatsApp | Open |
 | v0.3.0 | Platform Expansion — Telegram, Slack, OpenTelemetry | Closed (released 2026-03-17) |
-| v0.4.0 | Production Infrastructure — Docker, CI/CD, web dashboard | Open |
+| v0.4.0 | Production Infrastructure — Docker, CI/CD, web dashboard | Closed (released 2026-03-17) |
+| v0.4.5 | Config flexibility + integration test suite | Closed (released 2026-03-18) |
 | v0.5.0 | K8s manifests, migration tool | Open |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
@@ -155,15 +156,16 @@ src/
 ### Required Environment Variables
 
 ```bash
-DISCORD_BOT_TOKEN=your_discord_bot_token   # From Discord Developer Portal
 ANTHROPIC_API_KEY=your_anthropic_api_key   # From console.anthropic.com
 ```
 
 ### Optional
 
 ```bash
+DISCORD_BOT_TOKEN=your_discord_bot_token   # From Discord Developer Portal; absent = no Discord channel
 CONFIG_FILE=config.yaml    # Path to YAML config file
 RUST_LOG=info              # Log level: trace, debug, info, warn, error
+ANTHROPIC_API_BASE=https://api.anthropic.com  # Override API base URL (for mock servers/proxies)
 ```
 
 ### Config File (config.yaml)

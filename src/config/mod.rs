@@ -153,6 +153,11 @@ pub struct AgentsConfig {
 
     #[serde(default = "default_planning_max_steps")]
     pub planning_max_steps: usize,
+
+    /// Override the Anthropic API base URL (e.g. for test mock servers).
+    /// When `None`, defaults to `https://api.anthropic.com`.
+    #[serde(default)]
+    pub api_base: Option<String>,
 }
 
 // Default values
@@ -210,6 +215,7 @@ impl Default for AgentsConfig {
             temperature: default_temperature(),
             planning_enabled: false,
             planning_max_steps: default_planning_max_steps(),
+            api_base: None,
         }
     }
 }
@@ -233,8 +239,12 @@ impl Config {
         }
 
         // Build config from environment variables
-        let discord_token = std::env::var("DISCORD_BOT_TOKEN")
-            .map_err(|_| anyhow::anyhow!("DISCORD_BOT_TOKEN not set"))?;
+        let discord = std::env::var("DISCORD_BOT_TOKEN")
+            .ok()
+            .map(|token| DiscordConfig {
+                enabled: true,
+                auth: DiscordAuthConfig { token },
+            });
 
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
@@ -293,12 +303,7 @@ impl Config {
                 log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| default_log_level()),
             },
             channels: ChannelsConfig {
-                discord: Some(DiscordConfig {
-                    enabled: true,
-                    auth: DiscordAuthConfig {
-                        token: discord_token,
-                    },
-                }),
+                discord,
                 whatsapp,
                 telegram,
                 slack,
@@ -317,6 +322,7 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_planning_max_steps),
+                api_base: std::env::var("ANTHROPIC_API_BASE").ok(),
             },
             tools: ToolsConfig {
                 enabled: std::env::var("TOOLS_ENABLED")

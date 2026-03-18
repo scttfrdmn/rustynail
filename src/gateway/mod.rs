@@ -321,6 +321,18 @@ impl Gateway {
     }
 }
 
+/// Public entry point for integration tests — delegates to `handle_message_inner`.
+pub async fn handle_message_for_test(
+    memory: &Arc<dyn MemoryStore>,
+    agent_manager: &Arc<AgentManager>,
+    channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
+    user_prefs: &Arc<user_prefs::UserPreferences>,
+    stats: &Arc<MessageStats>,
+    message: Message,
+) -> Result<()> {
+    handle_message_inner(memory, agent_manager, channels, user_prefs, stats, message).await
+}
+
 /// Core message-handling logic shared between the internal loop and public method.
 async fn handle_message_inner(
     memory: &Arc<dyn MemoryStore>,

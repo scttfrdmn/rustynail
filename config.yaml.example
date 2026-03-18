@@ -36,6 +36,9 @@ agents:
   # Temperature for responses (0.0 - 1.0)
   temperature: 0.7
 
+  # Override Anthropic API base URL (for test mock servers or proxies)
+  # api_base: http://localhost:9999
+
 # Dashboard configuration (optional)
 dashboard:
   # Uncomment to require HTTP basic auth on /dashboard and /dashboard/data.
