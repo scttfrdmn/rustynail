@@ -1,5 +1,9 @@
 use crate::config::{AgentsConfig, ToolsConfig};
 use crate::tools::ToolRegistry;
+
+const SYSTEM_PROMPT: &str = "You are a helpful AI assistant named RustyNail. \
+    Be conversational, friendly, and concise. \
+    You're chatting with users on Discord and other platforms.";
 use agenkit::adapters::anthropic::{AnthropicAgent, AnthropicConfig};
 use agenkit::core::Agent;
 use agenkit::patterns::planning::{PlanningAgent, PlanningConfig};
@@ -114,12 +118,7 @@ impl AgentManager {
         ConversationalAgent::new(ConversationalConfig {
             llm: llm_for_agent,
             max_history: self.config.max_history,
-            system_prompt: Some(
-                "You are a helpful AI assistant named RustyNail. \
-                 Be conversational, friendly, and concise. \
-                 You're chatting with users on Discord and other platforms."
-                    .to_string(),
-            ),
+            system_prompt: Some(SYSTEM_PROMPT.to_string()),
             include_system: true,
         })
         .map_err(|e| anyhow::anyhow!("failed to create ConversationalAgent: {}", e))

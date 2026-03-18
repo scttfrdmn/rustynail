@@ -21,7 +21,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-/// Configuration for starting the HTTP server.
+/// All parameters needed to start the HTTP server in a single struct.
+///
+/// Passed by value to `start_http_server`; the server owns its state for the
+/// lifetime of the process.
 pub struct HttpServerConfig {
     pub port: u16,
     pub channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
@@ -37,7 +40,7 @@ pub struct HttpServerConfig {
     pub dashboard_expected_auth: Option<String>,
 }
 
-/// HTTP server state shared across handlers
+/// Axum shared state cloned into every request handler.
 #[derive(Clone)]
 pub struct AppState {
     pub channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,

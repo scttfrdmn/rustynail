@@ -3,6 +3,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Provides sandboxed filesystem access to agents.
+///
+/// All paths are resolved relative to the configured `root`. Any path that
+/// would escape the root (e.g. via `..` components) is rejected.
 pub struct FileSystemTool {
     root: PathBuf,
 }

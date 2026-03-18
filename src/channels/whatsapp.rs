@@ -8,6 +8,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+const NAME: &str = "whatsapp";
+const GRAPH_API_VERSION: &str = "v18.0";
+
 pub struct WhatsAppChannel {
     id: String,
     config: WhatsAppConfig,
@@ -35,7 +38,7 @@ impl Channel for WhatsAppChannel {
     }
 
     fn name(&self) -> &str {
-        "whatsapp"
+        NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -55,8 +58,8 @@ impl Channel for WhatsAppChannel {
 
     async fn send_message(&self, message: Message) -> Result<()> {
         let url = format!(
-            "https://graph.facebook.com/v18.0/{}/messages",
-            self.config.phone_number_id
+            "https://graph.facebook.com/{}/{}/messages",
+            GRAPH_API_VERSION, self.config.phone_number_id
         );
 
         let body = serde_json::json!({

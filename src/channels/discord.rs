@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info};
 
+const NAME: &str = "discord";
+
 pub struct DiscordChannel {
     id: String,
     token: String,
@@ -41,7 +43,7 @@ impl EventHandler for Handler {
         );
 
         // Send to gateway for processing
-        if let Err(e) = self.message_tx.send(message.clone()) {
+        if let Err(e) = self.message_tx.send(message) {
             error!("Failed to send message to gateway: {}", e);
             return;
         }
@@ -70,7 +72,7 @@ impl Channel for DiscordChannel {
     }
 
     fn name(&self) -> &str {
-        "discord"
+        NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -136,9 +138,7 @@ impl Channel for DiscordChannel {
     }
 
     fn health(&self) -> ChannelHealth {
-        // This is a sync method, so we can't await here
-        // In a real implementation, we'd want to restructure this
-        ChannelHealth::Healthy
+        self.health.blocking_read().clone()
     }
 
     fn is_running(&self) -> bool {

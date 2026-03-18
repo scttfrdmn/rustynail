@@ -2,6 +2,9 @@ use agenkit::{AgentError, Tool, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+/// Evaluates basic arithmetic operations for agents.
+///
+/// Supports: `add`, `sub`, `mul`, `div`, `pow`, `sqrt`, `abs`, `floor`, `ceil`, `round`.
 pub struct CalculatorTool;
 
 #[async_trait]

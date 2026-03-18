@@ -12,6 +12,8 @@ use tracing::{error, info};
 
 type HmacSha256 = Hmac<Sha256>;
 
+const NAME: &str = "slack";
+
 pub struct SlackChannel {
     id: String,
     config: SlackConfig,
@@ -39,7 +41,7 @@ impl Channel for SlackChannel {
     }
 
     fn name(&self) -> &str {
-        "slack"
+        NAME
     }
 
     async fn start(&mut self) -> Result<()> {

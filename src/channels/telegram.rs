@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+const NAME: &str = "telegram";
+
 pub struct TelegramChannel {
     id: String,
     config: TelegramConfig,
@@ -35,7 +37,7 @@ impl Channel for TelegramChannel {
     }
 
     fn name(&self) -> &str {
-        "telegram"
+        NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -136,7 +138,7 @@ pub struct TelegramChat {
 /// Convert a Telegram update into a `Message`, returning None for non-text or missing updates.
 pub fn parse_update(update: &TelegramUpdate) -> Option<Message> {
     let tg_msg = update.message.as_ref()?;
-    let text = tg_msg.text.as_ref()?.clone();
+    let text = tg_msg.text.clone()?;
 
     let chat_id = tg_msg.chat.id.to_string();
 

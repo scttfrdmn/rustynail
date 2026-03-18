@@ -5,6 +5,9 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// Executes web searches via the [Tavily API](https://docs.tavily.com).
+///
+/// Registered when `TAVILY_API_KEY` is set and `tools.enabled = true`.
 pub struct WebSearchTool {
     api_key: String,
     http_client: Client,
@@ -73,8 +76,7 @@ impl Tool for WebSearchTool {
         let search_depth = params
             .get("search_depth")
             .and_then(|v| v.as_str())
-            .unwrap_or("basic")
-            .to_string();
+            .unwrap_or("basic");
 
         let body = json!({
             "api_key": self.api_key,
@@ -143,24 +145,9 @@ mod tests {
         assert!(!result.success);
     }
 
-    #[tokio::test]
-    async fn test_success_response() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/search")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"answer":"Rust is great","results":[{"title":"Rust lang","url":"https://rust-lang.org","content":"Fast, safe."}]}"#)
-            .create_async()
-            .await;
-
-        // We need to use the real HTTP client but override the URL — use a custom client + mock
-        // Since WebSearchTool hard-codes the URL, we verify the parsing logic via a direct
-        // deserialisation test instead.
-        let _ = mock; // silence unused warning
-        drop(server);
-
-        // Verify that ToolResult fields match what we'd get
+    #[test]
+    fn test_response_parsing() {
+        // Verify the JSON parsing logic used by execute() against a fixture payload.
         let data = serde_json::json!({
             "answer": "Rust is great",
             "results": [{"title": "Rust lang", "url": "https://rust-lang.org", "content": "Fast, safe."}]

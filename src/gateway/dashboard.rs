@@ -13,10 +13,11 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::gateway::http::AppState;
+use crate::gateway::http::{AppState, ChannelStatus};
 
 // ── Data structures ───────────────────────────────────────────────────────────
 
+/// A single message entry stored in the recent-messages ring buffer.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentMessage {
     pub timestamp: DateTime<Utc>,
@@ -26,11 +27,15 @@ pub struct RecentMessage {
     pub direction: String,
 }
 
+/// Shared message statistics threaded through the gateway.
+///
+/// Counters are atomics (lock-free reads). The recent-message ring buffer is
+/// guarded by a `RwLock` and capped at 50 entries.
 pub struct MessageStats {
-    pub messages_in: AtomicU64,
-    pub messages_out: AtomicU64,
-    pub start_instant: Instant,
-    pub start_time: DateTime<Utc>,
+    messages_in: AtomicU64,
+    messages_out: AtomicU64,
+    start_instant: Instant,
+    start_time: DateTime<Utc>,
     recent: RwLock<VecDeque<RecentMessage>>,
 }
 
@@ -45,14 +50,28 @@ impl MessageStats {
         })
     }
 
+    /// Total inbound messages since startup.
+    pub fn messages_in(&self) -> u64 {
+        self.messages_in.load(Ordering::Relaxed)
+    }
+
+    /// Total outbound messages since startup.
+    pub fn messages_out(&self) -> u64 {
+        self.messages_out.load(Ordering::Relaxed)
+    }
+
+    /// Wall-clock time the gateway started.
+    pub fn start_time(&self) -> DateTime<Utc> {
+        self.start_time
+    }
+
     pub async fn record_inbound_async(&self, message: &Message) {
         self.messages_in.fetch_add(1, Ordering::Relaxed);
-        let preview = message.content.chars().take(120).collect::<String>();
         let entry = RecentMessage {
             timestamp: Utc::now(),
             channel_id: message.channel_id.clone(),
             user_id: message.user_id.clone(),
-            content_preview: preview,
+            content_preview: message.content.chars().take(120).collect(),
             direction: "inbound".to_string(),
         };
         let mut recent = self.recent.write().await;
@@ -64,12 +83,11 @@ impl MessageStats {
 
     pub async fn record_outbound_async(&self, message: &Message) {
         self.messages_out.fetch_add(1, Ordering::Relaxed);
-        let preview = message.content.chars().take(120).collect::<String>();
         let entry = RecentMessage {
             timestamp: Utc::now(),
             channel_id: message.channel_id.clone(),
             user_id: message.user_id.clone(),
-            content_preview: preview,
+            content_preview: message.content.chars().take(120).collect(),
             direction: "outbound".to_string(),
         };
         let mut recent = self.recent.write().await;
@@ -83,19 +101,13 @@ impl MessageStats {
         self.recent.read().await.iter().cloned().collect()
     }
 
+    /// Seconds elapsed since the gateway started (monotonic).
     pub fn uptime_seconds(&self) -> u64 {
         self.start_instant.elapsed().as_secs()
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct ChannelStatus {
-    pub id: String,
-    pub name: String,
-    pub health: String,
-    pub running: bool,
-}
-
+/// JSON payload returned by `GET /dashboard/data`.
 #[derive(Debug, Serialize)]
 pub struct DashboardData {
     pub version: &'static str,
@@ -177,10 +189,10 @@ pub async fn dashboard_data_handler(
 
     let data = DashboardData {
         version: env!("CARGO_PKG_VERSION"),
-        start_time: state.stats.start_time,
+        start_time: state.stats.start_time(),
         uptime_seconds: state.stats.uptime_seconds(),
-        messages_in: state.stats.messages_in.load(Ordering::Relaxed),
-        messages_out: state.stats.messages_out.load(Ordering::Relaxed),
+        messages_in: state.stats.messages_in(),
+        messages_out: state.stats.messages_out(),
         active_users,
         channels: channel_statuses,
         recent_messages: recent,

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-17
+
+### Fixed
+- `DiscordChannel::health()` always returned `ChannelHealth::Healthy`; it now reads the actual stored health state via `blocking_read()`
+
+### Changed
+- `DiscordChannel::message()` handler no longer clones the `Message` before passing it to `mpsc::send()` (needless allocation)
+- `parse_update()` in `telegram.rs` simplifies `text.as_ref()?.clone()` to the idiomatic `text.clone()?`
+- `ToolRegistry` now derives `Default`; `new()` delegates to `Self::default()`
+- `MessageStats` fields (`messages_in`, `messages_out`, `start_instant`, `start_time`) are now private; public accessor methods `messages_in()`, `messages_out()`, and `start_time()` replace direct field access
+- Duplicate `ChannelStatus` struct in `dashboard.rs` removed; the module now re-uses `http::ChannelStatus`
+- `WebSearchTool::execute()` no longer allocates a `String` for the `search_depth` parameter (kept as `&str`)
+- `test_success_response` in `web_search.rs` replaced with `test_response_parsing` that directly tests the JSON-parsing logic without a dead mockito server
+- Channel adapters (discord, whatsapp, telegram, slack) use named `const NAME` rather than inline string literals in `name()` implementations
+- WhatsApp Graph API version extracted to `const GRAPH_API_VERSION` in `whatsapp.rs`
+- Agent system prompt extracted to `const SYSTEM_PROMPT` in `agents/manager.rs`
+- Doc comments added to `HttpServerConfig`, `AppState`, `MessageStats`, `DashboardData`, `RecentMessage`, `ToolRegistry`, `CalculatorTool`, `FileSystemTool`, `WebSearchTool`
+
 ## [0.4.0] - 2026-03-17
 
 ### Added
@@ -62,7 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/scttfrdmn/rustynail/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/scttfrdmn/rustynail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scttfrdmn/rustynail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scttfrdmn/rustynail/compare/v0.1.0...v0.2.0
