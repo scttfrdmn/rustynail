@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-03-18
+
+### Added
+- Gateway API bearer token authentication: `GatewayConfig.api_token` (env: `GATEWAY_API_TOKEN`); Axum middleware uses `subtle::ConstantTimeEq` for timing-safe comparison; `/live` and `/ready` always exempt (K8s probes); disabled when token is absent (backward compatible)
+- Token/cost accounting: `tokens_in` and `tokens_out` atomic counters on `MessageStats`; `record_tokens(input, output)` called after each LLM completion; exposed via `/metrics` as `rustynail_tokens_in_total` / `rustynail_tokens_out_total` and `/dashboard/data` JSON
+- Web fetch tool (`web_fetch`): fetches a URL with 15s timeout via `reqwest`; HTML stripped via `scraper` crate (skips `<script>`, `<style>`, `<noscript>`); respects `max_bytes` parameter (default 512 KB); registered when `tools.enabled = true`
+- Shell execution tool (`shell`): executes commands via `sh -c` with `tokio::process::Command`; two-step approval gate (returns `"Pending approval: ..."` unless `approved=true`); optional `allowed_commands` prefix allowlist; configurable via `tools.shell.enabled`, `tools.shell.require_approval`, `tools.shell.allowed_commands`
+- Agent skills system: `SkillRegistry` in `src/skills/mod.rs` discovers `SKILL.md` files from configured paths; selected skills injected into agent system prompts (up to `skills.max_active`); configured via `skills.enabled`, `skills.paths`, `skills.max_active` (env: `SKILLS_ENABLED`, `SKILLS_PATHS`, `SKILLS_MAX_ACTIVE`)
+- Bundled skills: `skills/rustynail-assistant/SKILL.md` (surfaces available channels and tools) and `skills/formatting/SKILL.md` (channel-aware output formatting guidance)
+- Microsoft Teams channel (`TeamsChannel`): Bot Framework Activity webhook at `POST /channels/teams/messages`; OAuth2 client credentials token cache with 60s pre-refresh; outbound send to `{serviceUrl}/v3/conversations/{id}/activities/{activityId}`; configured via `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`
+- Zero-credential test harness: `StubAgent` (echo mode or fixed response, selected by `llm_provider = "stub"`); `TestChannel` with `POST /test/send` inject and `GET /test/responses` drain endpoints; `configs/harness.yaml` minimal config; integration tests in `tests/harness/` (skip unless `HARNESS_URL` is set)
+- Helm chart at `deploy/helm/rustynail/`: Chart.yaml, values.yaml, deployment, service, configmap, secret, ingress, HPA, service account, helpers, NOTES.txt; liveness → `/live`, readiness → `/ready`; optional Redis subchart
+- Criterion benchmark suite in `benches/gateway_benchmarks.rs`: `bench_inmemory_store_add`, `bench_inmemory_store_get`, `bench_config_load`, `bench_message_stats_record`
+- `config check` prints `Gateway auth: enabled/disabled` and `Skills: enabled (N paths, M skills loaded) / disabled`
+- `stub` provider option for `agents.llm_provider` in `AgentManager`
+
+### Changed
+- `Cargo.toml` bumped to `0.8.0`; added `scraper = "0.19"` (HTML stripping), `subtle = "2"` (constant-time comparison), `criterion = "0.5"` (dev dep for benchmarks)
+- `GatewayConfig` extended with `api_token: Option<String>`
+- `ChannelsConfig` extended with `teams: Option<TeamsConfig>` and `test_channel: bool`
+- `ToolsConfig` extended with `shell: ShellToolConfig`
+- `Config` extended with `skills: SkillsConfig`
+- `AgentManager` gains `skills_context: Option<String>` field; new constructor `with_tools_and_skills()`; skills context appended to system prompt when set
+- `HttpServerConfig` and `AppState` extended with `teams_tx`, `api_token`, `test_channel` fields
+- `DashboardData` extended with `tokens_in` and `tokens_out` fields
+- Gateway `start()` registers Teams channel, test channel, web fetch tool, and shell tool
+
 ## [0.7.0] - 2026-03-18
 
 ### Added

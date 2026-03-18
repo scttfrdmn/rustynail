@@ -1,0 +1,14 @@
+gateway:
+  http_port: 8080
+  websocket_port: 18789
+  log_level: error
+
+channels:
+  test_channel: true
+
+agents:
+  api_key: stub
+  llm_provider: stub
+
+memory:
+  backend: inmemory

@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig};
+use rustynail::config::{AgentsConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig, SkillsConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
 use rustynail::gateway::user_prefs::UserPreferences;
@@ -18,6 +18,7 @@ pub fn make_test_config() -> Config {
             websocket_port: 18789,
             http_port: 18081,
             log_level: "error".to_string(),
+            api_token: None,
         },
         channels: ChannelsConfig {
             discord: None,
@@ -28,6 +29,8 @@ pub fn make_test_config() -> Config {
             webhook: None,
             webchat: None,
             email: None,
+            teams: None,
+            test_channel: false,
         },
         agents: AgentsConfig {
             api_key: "test_key_unused".to_string(),
@@ -38,6 +41,7 @@ pub fn make_test_config() -> Config {
         dashboard: Default::default(),
         memory: MemoryConfig::default(),
         mcp: Default::default(),
+        skills: SkillsConfig::default(),
     }
 }
 
@@ -58,9 +62,12 @@ pub fn make_test_state() -> AppState {
         webhook_tx: None,
         webchat_sessions: None,
         webchat_tx: None,
+        teams_tx: None,
         user_prefs: Arc::new(UserPreferences::new()),
         stats: MessageStats::new(),
         dashboard_expected_auth: None,
+        api_token: None,
+        test_channel: None,
     }
 }
 
@@ -89,9 +96,12 @@ pub fn make_test_state_with_webhooks() -> (
         webhook_tx: None,
         webchat_sessions: None,
         webchat_tx: None,
+        teams_tx: None,
         user_prefs: Arc::new(UserPreferences::new()),
         stats: MessageStats::new(),
         dashboard_expected_auth: None,
+        api_token: None,
+        test_channel: None,
     };
     (state, wa_rx, tg_rx, sl_rx)
 }

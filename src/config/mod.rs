@@ -16,6 +16,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,10 @@ pub struct GatewayConfig {
 
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Optional bearer token for API authentication (env: `GATEWAY_API_TOKEN`).
+    /// When `None` or empty, auth is disabled (backward compatible).
+    pub api_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +46,10 @@ pub struct ChannelsConfig {
     pub webhook: Option<WebhookConfig>,
     pub webchat: Option<WebchatConfig>,
     pub email: Option<EmailConfig>,
+    pub teams: Option<TeamsConfig>,
+    /// Enable the zero-credential test channel (`POST /test/send`, `GET /test/responses`).
+    #[serde(default)]
+    pub test_channel: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +224,85 @@ pub struct SmtpConfig {
     pub from_address: String,
 }
 
+// ── Microsoft Teams ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    pub auth: TeamsAuthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsAuthConfig {
+    #[serde(default)]
+    pub app_id: String,
+
+    #[serde(default)]
+    pub app_password: String,
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Directories to search for skill directories (each must contain a SKILL.md).
+    #[serde(default = "default_skills_paths")]
+    pub paths: Vec<String>,
+
+    /// Maximum number of skills injected into each agent's system prompt.
+    #[serde(default = "default_skills_max_active")]
+    pub max_active: usize,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            paths: default_skills_paths(),
+            max_active: default_skills_max_active(),
+        }
+    }
+}
+
+fn default_skills_paths() -> Vec<String> {
+    vec!["skills/".to_string()]
+}
+
+fn default_skills_max_active() -> usize {
+    3
+}
+
+// ── Shell tool ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellToolConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Require the caller to pass `approved=true` before executing (default true).
+    #[serde(default = "default_true")]
+    pub require_approval: bool,
+
+    /// If non-empty, the command must start with one of these prefixes.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+}
+
+impl Default for ShellToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_approval: true,
+            allowed_commands: Vec::new(),
+        }
+    }
+}
+
 // ── MCP servers ───────────────────────────────────────────────────────────────
 
 /// Configuration for one MCP server connection.
@@ -376,6 +465,10 @@ pub struct ToolsConfig {
     pub filesystem_root: Option<String>,
 
     pub web_search_api_key: Option<String>,
+
+    /// Shell tool configuration (sub-key `tools.shell`).
+    #[serde(default)]
+    pub shell: ShellToolConfig,
 }
 
 impl Default for ToolsConfig {
@@ -385,6 +478,7 @@ impl Default for ToolsConfig {
             max_steps: default_max_steps(),
             filesystem_root: None,
             web_search_api_key: None,
+            shell: ShellToolConfig::default(),
         }
     }
 }
@@ -674,6 +768,21 @@ impl Config {
             None
         };
 
+        let teams = if let (Ok(app_id), Ok(app_password)) = (
+            std::env::var("TEAMS_APP_ID"),
+            std::env::var("TEAMS_APP_PASSWORD"),
+        ) {
+            Some(TeamsConfig {
+                enabled: true,
+                auth: TeamsAuthConfig {
+                    app_id,
+                    app_password,
+                },
+            })
+        } else {
+            None
+        };
+
         Ok(Config {
             gateway: GatewayConfig {
                 websocket_port: std::env::var("GATEWAY_WEBSOCKET_PORT")
@@ -685,6 +794,7 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_http_port),
                 log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| default_log_level()),
+                api_token: std::env::var("GATEWAY_API_TOKEN").ok(),
             },
             channels: ChannelsConfig {
                 discord,
@@ -695,6 +805,11 @@ impl Config {
                 webhook: None, // webhook endpoints not configurable via env vars alone
                 webchat,
                 email,
+                teams,
+                test_channel: std::env::var("TEST_CHANNEL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
             },
             agents: AgentsConfig {
                 llm_provider: std::env::var("LLM_PROVIDER")
@@ -725,6 +840,20 @@ impl Config {
                     .unwrap_or_else(default_max_steps),
                 filesystem_root: std::env::var("TOOLS_FILESYSTEM_ROOT").ok(),
                 web_search_api_key: std::env::var("TAVILY_API_KEY").ok(),
+                shell: ShellToolConfig {
+                    enabled: std::env::var("TOOLS_SHELL_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
+                    require_approval: std::env::var("TOOLS_SHELL_REQUIRE_APPROVAL")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(true),
+                    allowed_commands: std::env::var("TOOLS_SHELL_ALLOWED_COMMANDS")
+                        .ok()
+                        .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
+                        .unwrap_or_default(),
+                },
             },
             otel: OtelConfig {
                 endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
@@ -769,6 +898,20 @@ impl Config {
                 },
             },
             mcp: McpConfig::default(),
+            skills: SkillsConfig {
+                enabled: std::env::var("SKILLS_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                paths: std::env::var("SKILLS_PATHS")
+                    .ok()
+                    .map(|s| s.split(':').map(|p| p.trim().to_string()).collect())
+                    .unwrap_or_else(default_skills_paths),
+                max_active: std::env::var("SKILLS_MAX_ACTIVE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_skills_max_active),
+            },
         })
     }
 }

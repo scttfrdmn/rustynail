@@ -123,6 +123,7 @@ cargo fmt
 | v0.5.0 | BuckTooth parity — Prometheus, Redis, long-poll, tools, WS dashboard, CLI, distroless | Closed (released 2026-03-18) |
 | v0.6.0 | OpenClaw parity — multi-LLM, SQLite/Postgres/vector memory, summarization, SMS, webhook, webchat, email, Slack Socket Mode, shell completion, Grafana | Closed (released 2026-03-18) |
 | v0.7.0 | MCP integration — `rustynail mcp serve`, MCP client connectivity, agenkit 0.83.0 | Closed (released 2026-03-18) |
+| v0.8.0 | BuckTooth Full Parity + Agent Skills — bearer token auth, web fetch tool, shell tool, MS Teams, Helm, benchmarks, zero-credential harness, skills | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview

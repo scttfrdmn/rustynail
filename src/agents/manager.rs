@@ -1,10 +1,12 @@
-use crate::config::{AgentsConfig, ToolsConfig};
+use crate::config::{AgentsConfig, SkillsConfig, ToolsConfig};
+use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 
 const SYSTEM_PROMPT: &str = "You are a helpful AI assistant named RustyNail. \
     Be conversational, friendly, and concise. \
     You're chatting with users on Discord and other platforms.";
 
+use crate::agents::stub::StubAgent;
 use agenkit::adapters::anthropic::{AnthropicAgent, AnthropicConfig};
 use agenkit::adapters::bedrock::{BedrockAdapter, BedrockConfig};
 use agenkit::adapters::gemini::{GeminiAdapter, GeminiConfig};
@@ -30,6 +32,8 @@ pub struct AgentManager {
     agents: Arc<RwLock<HashMap<String, ConversationalAgent>>>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
     planning_agent: Option<Arc<PlanningAgent>>,
+    /// Skills context appended to every new agent's system prompt (when skills are enabled).
+    skills_context: Option<String>,
 }
 
 impl AgentManager {
@@ -41,6 +45,15 @@ impl AgentManager {
         config: AgentsConfig,
         tools_config: ToolsConfig,
         registry: ToolRegistry,
+    ) -> Self {
+        Self::with_tools_and_skills(config, tools_config, registry, None)
+    }
+
+    pub fn with_tools_and_skills(
+        config: AgentsConfig,
+        tools_config: ToolsConfig,
+        registry: ToolRegistry,
+        skills_context: Option<String>,
     ) -> Self {
         let planning_agent = if config.planning_enabled {
             let anthropic_config = AnthropicConfig {
@@ -84,6 +97,7 @@ impl AgentManager {
             agents: Arc::new(RwLock::new(HashMap::new())),
             tool_registry: Arc::new(RwLock::new(registry)),
             planning_agent,
+            skills_context,
         }
     }
 
@@ -101,6 +115,7 @@ impl AgentManager {
         let api_base = self.config.api_base.clone();
 
         let llm: Arc<dyn Agent> = match self.config.llm_provider.as_str() {
+            "stub" => Arc::new(StubAgent::new()),
             "openai" => {
                 let config = OpenAIConfig {
                     api_key,
@@ -215,10 +230,18 @@ impl AgentManager {
         };
         drop(registry);
 
+        // Build system prompt, optionally appending skill context
+        let system_prompt = match &self.skills_context {
+            Some(ctx) if !ctx.is_empty() => {
+                format!("{}{}", SYSTEM_PROMPT, ctx)
+            }
+            _ => SYSTEM_PROMPT.to_string(),
+        };
+
         ConversationalAgent::new(ConversationalConfig {
             llm: llm_for_agent,
             max_history: self.config.max_history,
-            system_prompt: Some(SYSTEM_PROMPT.to_string()),
+            system_prompt: Some(system_prompt),
             include_system: true,
         })
         .map_err(|e| anyhow::anyhow!("failed to create ConversationalAgent: {}", e))

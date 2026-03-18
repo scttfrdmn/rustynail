@@ -1,0 +1,23 @@
+apiVersion: v2
+name: rustynail
+description: RustyNail — High-performance AI assistant built with Rust and Agenkit
+type: application
+version: 0.8.0
+appVersion: "0.8.0"
+keywords:
+  - ai
+  - assistant
+  - discord
+  - claude
+  - agenkit
+home: https://github.com/scttfrdmn/rustynail
+sources:
+  - https://github.com/scttfrdmn/rustynail
+maintainers:
+  - name: scttfrdmn
+    url: https://github.com/scttfrdmn
+dependencies:
+  - name: redis
+    version: "19.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

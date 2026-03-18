@@ -30,9 +30,12 @@ fn make_state_with_auth(password: &str) -> AppState {
         webhook_tx: None,
         webchat_sessions: None,
         webchat_tx: None,
+        teams_tx: None,
         user_prefs: Arc::new(UserPreferences::new()),
         stats: MessageStats::new(),
         dashboard_expected_auth: Some(expected),
+        api_token: None,
+        test_channel: None,
     }
 }
 

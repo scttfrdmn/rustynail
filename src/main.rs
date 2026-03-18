@@ -294,11 +294,44 @@ fn cmd_config_check() -> Result<()> {
     if config.channels.email.as_ref().is_some_and(|c| c.enabled) {
         channels.push("email");
     }
+    if config.channels.teams.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("teams");
+    }
     if channels.is_empty() {
         println!("  Channels:         (none configured)");
     } else {
         println!("  Channels:         {}", channels.join(", "));
     }
+
+    println!(
+        "  Gateway auth:     {}",
+        if config
+            .gateway
+            .api_token
+            .as_deref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+        {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+
+    println!(
+        "  Skills:           {}",
+        if config.skills.enabled {
+            let mut registry = rustynail::skills::SkillRegistry::new();
+            let n = registry.discover_skills(&config.skills.paths);
+            format!(
+                "enabled ({} paths, {} skills loaded)",
+                config.skills.paths.len(),
+                n
+            )
+        } else {
+            "disabled".to_string()
+        }
+    );
 
     Ok(())
 }

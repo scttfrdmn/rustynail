@@ -59,6 +59,10 @@ pub struct RecentMessage {
 pub struct MessageStats {
     messages_in: AtomicU64,
     messages_out: AtomicU64,
+    /// Total LLM input tokens consumed since startup.
+    tokens_in: AtomicU64,
+    /// Total LLM output tokens generated since startup.
+    tokens_out: AtomicU64,
     start_instant: Instant,
     start_time: DateTime<Utc>,
     recent: RwLock<VecDeque<RecentMessage>>,
@@ -66,6 +70,8 @@ pub struct MessageStats {
     prom_registry: Registry,
     prom_messages_in: Counter,
     prom_messages_out: Counter,
+    prom_tokens_in: Counter,
+    prom_tokens_out: Counter,
     prom_active_users: Gauge,
     prom_healthy_channels: Gauge,
     prom_message_duration: Histogram,
@@ -86,6 +92,18 @@ impl MessageStats {
         let prom_messages_out = Counter::with_opts(Opts::new(
             "rustynail_messages_out_total",
             "Total outbound messages since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_tokens_in = Counter::with_opts(Opts::new(
+            "rustynail_tokens_in_total",
+            "Total LLM input tokens consumed since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_tokens_out = Counter::with_opts(Opts::new(
+            "rustynail_tokens_out_total",
+            "Total LLM output tokens generated since startup",
         ))
         .expect("counter creation failed");
 
@@ -117,6 +135,12 @@ impl MessageStats {
             .register(Box::new(prom_messages_out.clone()))
             .expect("register failed");
         registry
+            .register(Box::new(prom_tokens_in.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_tokens_out.clone()))
+            .expect("register failed");
+        registry
             .register(Box::new(prom_active_users.clone()))
             .expect("register failed");
         registry
@@ -132,12 +156,16 @@ impl MessageStats {
         Arc::new(Self {
             messages_in: AtomicU64::new(0),
             messages_out: AtomicU64::new(0),
+            tokens_in: AtomicU64::new(0),
+            tokens_out: AtomicU64::new(0),
             start_instant: Instant::now(),
             start_time: Utc::now(),
             recent: RwLock::new(VecDeque::new()),
             prom_registry: registry,
             prom_messages_in,
             prom_messages_out,
+            prom_tokens_in,
+            prom_tokens_out,
             prom_active_users,
             prom_healthy_channels,
             prom_message_duration,
@@ -153,6 +181,24 @@ impl MessageStats {
     /// Total outbound messages since startup.
     pub fn messages_out(&self) -> u64 {
         self.messages_out.load(Ordering::Relaxed)
+    }
+
+    /// Total LLM input tokens consumed since startup.
+    pub fn tokens_in(&self) -> u64 {
+        self.tokens_in.load(Ordering::Relaxed)
+    }
+
+    /// Total LLM output tokens generated since startup.
+    pub fn tokens_out(&self) -> u64 {
+        self.tokens_out.load(Ordering::Relaxed)
+    }
+
+    /// Record token usage from a single LLM completion.
+    pub fn record_tokens(&self, input: u64, output: u64) {
+        self.tokens_in.fetch_add(input, Ordering::Relaxed);
+        self.tokens_out.fetch_add(output, Ordering::Relaxed);
+        self.prom_tokens_in.inc_by(input as f64);
+        self.prom_tokens_out.inc_by(output as f64);
     }
 
     /// Wall-clock time the gateway started.
@@ -253,6 +299,8 @@ pub struct DashboardData {
     pub uptime_seconds: u64,
     pub messages_in: u64,
     pub messages_out: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
     pub active_users: usize,
     pub channels: Vec<ChannelStatus>,
     pub recent_messages: Vec<RecentMessage>,
@@ -331,6 +379,8 @@ pub async fn dashboard_data_handler(
         uptime_seconds: state.stats.uptime_seconds(),
         messages_in: state.stats.messages_in(),
         messages_out: state.stats.messages_out(),
+        tokens_in: state.stats.tokens_in(),
+        tokens_out: state.stats.tokens_out(),
         active_users,
         channels: channel_statuses,
         recent_messages: recent,

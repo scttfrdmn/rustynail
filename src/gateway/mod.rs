@@ -10,6 +10,7 @@ use crate::memory::{
     InMemoryStore, MemorySummarizer, MemoryStore, PostgresStore, RedisStore, SqliteStore,
     VectorMemoryStore,
 };
+use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
 use anyhow::Result;
@@ -175,6 +176,24 @@ impl Gateway {
                 }
             }
 
+            // Register web fetch tool (always enabled with tools)
+            let wf_tool = crate::tools::web_fetch::WebFetchTool;
+            if let Err(e) = tool_registry.register(Arc::new(wf_tool)) {
+                error!("Failed to register web fetch tool: {}", e);
+            }
+
+            // Register shell tool if enabled in config
+            if config.tools.shell.enabled {
+                let shell_cfg = crate::tools::shell::ShellToolConfig {
+                    require_approval: config.tools.shell.require_approval,
+                    allowed_commands: config.tools.shell.allowed_commands.clone(),
+                };
+                let sh_tool = crate::tools::shell::ShellTool::new(shell_cfg);
+                if let Err(e) = tool_registry.register(Arc::new(sh_tool)) {
+                    error!("Failed to register shell tool: {}", e);
+                }
+            }
+
             // Register calendar tool
             let cal_tool = crate::tools::calendar::CalendarTool::with_default_dir();
             if let Err(e) = tool_registry.register(Arc::new(cal_tool)) {
@@ -188,10 +207,25 @@ impl Gateway {
             }
         }
 
-        let agent_manager = Arc::new(AgentManager::with_tools(
+        // Discover skills if enabled
+        let skills_context = if config.skills.enabled {
+            let mut registry = SkillRegistry::new();
+            let n = registry.discover_skills(&config.skills.paths);
+            info!(
+                "Skills: enabled ({} paths, {} skills loaded)",
+                config.skills.paths.len(),
+                n
+            );
+            registry.build_skill_context(config.skills.max_active)
+        } else {
+            None
+        };
+
+        let agent_manager = Arc::new(AgentManager::with_tools_and_skills(
             config.agents.clone(),
             config.tools.clone(),
             tool_registry,
+            skills_context,
         ));
 
         Self {
@@ -331,6 +365,32 @@ impl Gateway {
             );
             self.register_channel(Box::new(em)).await;
         }
+
+        // Add Microsoft Teams channel if enabled
+        if let Some(teams_config) = self.config.channels.teams.clone().filter(|c| c.enabled) {
+            info!("Setting up Microsoft Teams channel (webhook mode)");
+            let teams = crate::channels::teams::TeamsChannel::new(
+                "teams-main".to_string(),
+                teams_config,
+            );
+            self.register_channel(Box::new(teams)).await;
+        }
+
+        // Add test channel if enabled
+        let test_channel_handle = if self.config.channels.test_channel {
+            info!("Setting up zero-credential test channel (POST /test/send, GET /test/responses)");
+            let tc = crate::channels::testchan::TestChannel::new("testchan-main".to_string());
+            let handle = Arc::new(
+                crate::channels::testchan::TestChannel::new("testchan-main".to_string())
+            );
+            let _ = tc; // registered below
+            self.register_channel(Box::new(
+                crate::channels::testchan::TestChannel::new("testchan-main".to_string())
+            )).await;
+            Some(handle)
+        } else {
+            None
+        };
 
         // Connect MCP servers and register their tools
         for server_cfg in &self.config.mcp.servers {
@@ -497,6 +557,14 @@ impl Gateway {
             .as_ref()
             .map(|_| self.message_tx.clone());
 
+        let teams_tx = self
+            .config
+            .channels
+            .teams
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|_| self.message_tx.clone());
+
         // Pre-compute dashboard basic-auth header value if password is set
         let dashboard_expected_auth = self.config.dashboard.auth_password.as_deref().map(|pw| {
             use base64::Engine;
@@ -522,9 +590,12 @@ impl Gateway {
             webhook_tx,
             webchat_sessions,
             webchat_tx,
+            teams_tx,
             user_prefs: self.user_prefs.clone(),
             stats: self.stats.clone(),
             dashboard_expected_auth,
+            api_token: self.config.gateway.api_token.clone(),
+            test_channel: test_channel_handle,
         };
 
         let http_task = tokio::spawn(async move {

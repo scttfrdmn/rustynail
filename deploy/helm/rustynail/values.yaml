@@ -1,0 +1,89 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/scttfrdmn/rustynail
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to Chart.appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: rustynail.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# RustyNail configuration
+config:
+  logLevel: info
+  httpPort: 8080
+  websocketPort: 18789
+
+# Secrets — set via --set or external secret manager
+secrets:
+  anthropicApiKey: ""
+  discordBotToken: ""
+  gatewayApiToken: ""
+  teamsAppId: ""
+  teamsAppPassword: ""
+
+# Redis subchart
+redis:
+  enabled: false
+  auth:
+    enabled: false
+
+# Memory backend: inmemory, redis, sqlite, postgres
+memory:
+  backend: inmemory
+  redisUrl: ""
+
+# Tools
+tools:
+  enabled: false
+  filesystemRoot: ""
+
+# Skills
+skills:
+  enabled: false
+  paths:
+    - skills/
+  maxActive: 3

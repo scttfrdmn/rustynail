@@ -2,7 +2,11 @@ pub mod calculator;
 pub mod calendar;
 pub mod filesystem;
 pub mod formatter;
+pub mod shell;
+pub mod web_fetch;
 pub mod web_search;
+
+pub use shell::ShellToolConfig;
 
 pub use agenkit::{Tool, ToolResult};
 
