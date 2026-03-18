@@ -1,5 +1,14 @@
+pub mod postgres;
 pub mod redis;
+pub mod sqlite;
+pub mod summarizer;
+pub mod vector;
+
+pub use postgres::PostgresStore;
 pub use redis::RedisStore;
+pub use sqlite::SqliteStore;
+pub use summarizer::MemorySummarizer;
+pub use vector::VectorMemoryStore;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

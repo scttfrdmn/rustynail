@@ -1,6 +1,6 @@
 [package]
 name = "rustynail"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
 description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"
@@ -63,8 +63,28 @@ prometheus = "0.13"
 # Redis memory store (blocking client)
 redis = { version = "0.24", features = ["default"] }
 
-# CLI subcommands
+# CLI subcommands + shell completion
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+
+# SQLite + PostgreSQL memory backends
+sqlx = { version = "0.7", features = ["sqlite", "postgres", "runtime-tokio", "macros"] }
+
+# Email channel
+lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
+native-tls = "0.2"
+imap = { version = "2.4", features = ["tls"] }
+futures-util = "0.3"
+serde_urlencoded = "0.7"
+
+# Generic webhook JSONPath extraction
+jsonpath-rust = "0.5"
+
+# Slack Socket Mode WebSocket client
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# Webchat concurrent session map
+dashmap = "5"
 
 # OpenTelemetry (pin to agenkit's versions to avoid duplicate crates)
 opentelemetry = { version = "0.23", features = ["trace"] }

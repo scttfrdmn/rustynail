@@ -1,0 +1,61 @@
+groups:
+  - name: rustynail
+    interval: 30s
+    rules:
+      - alert: RustyNailDown
+        expr: absent(rustynail_messages_in_total)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RustyNail instance is down"
+          description: "No metrics have been scraped from RustyNail for more than 2 minutes. The process may be down or unreachable."
+
+      - alert: HighMessageLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(rustynail_message_duration_seconds_bucket[5m])
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustyNail p95 message latency is high"
+          description: "The 95th-percentile message processing time has exceeded 10 seconds for 5 minutes. Current value: {{ $value | humanizeDuration }}."
+
+      - alert: ChannelUnhealthy
+        expr: rustynail_healthy_channels == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All RustyNail channels are unhealthy"
+          description: "No channels are reporting healthy status. Users cannot send or receive messages."
+
+      - alert: HighErrorRate
+        expr: |
+          rate(rustynail_messages_in_total[5m]) > 0
+          and
+          (
+            rate(rustynail_messages_out_total[5m])
+            /
+            rate(rustynail_messages_in_total[5m])
+          ) < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustyNail response rate is low (possible errors)"
+          description: "Less than 50% of inbound messages are receiving a response. Possible agent or channel errors."
+
+      - alert: NoActiveUsers
+        expr: |
+          rustynail_active_users == 0
+          and
+          rate(rustynail_messages_in_total[15m]) > 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Messages are arriving but active user count is zero"
+          description: "RustyNail is receiving messages but reporting zero active users. This may indicate an agent lifecycle issue."

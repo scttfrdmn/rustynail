@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: RustyNail
+    orgId: 1
+    folder: RustyNail
+    folderUid: rustynail
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/rustynail
+      foldersFromFilesStructure: false

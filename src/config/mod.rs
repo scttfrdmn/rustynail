@@ -34,6 +34,10 @@ pub struct ChannelsConfig {
     pub whatsapp: Option<WhatsAppConfig>,
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackConfig>,
+    pub sms: Option<SmsConfig>,
+    pub webhook: Option<WebhookConfig>,
+    pub webchat: Option<WebchatConfig>,
+    pub email: Option<EmailConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,30 +85,6 @@ pub struct TelegramConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryConfig {
-    /// Storage backend: `"inmemory"` (default) or `"redis"`.
-    #[serde(default = "default_memory_backend")]
-    pub backend: String,
-
-    /// Redis connection URL. Required when `backend = "redis"`.
-    pub redis_url: Option<String>,
-
-    /// TTL in seconds for Redis history keys. 0 = no expiry.
-    #[serde(default = "default_redis_ttl")]
-    pub redis_ttl_seconds: u64,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            backend: default_memory_backend(),
-            redis_url: None,
-            redis_ttl_seconds: default_redis_ttl(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlackConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -114,6 +94,209 @@ pub struct SlackConfig {
 
     #[serde(default)]
     pub signing_secret: String,
+
+    /// Socket Mode app-level token (starts with `xapp-`). Required when `mode = "socket"`.
+    pub app_token: Option<String>,
+
+    /// Receive mode: `"webhook"` (default) or `"socket"`.
+    #[serde(default = "default_slack_mode")]
+    pub mode: String,
+}
+
+// ── SMS / Twilio ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    pub auth: SmsAuthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmsAuthConfig {
+    #[serde(default)]
+    pub account_sid: String,
+
+    #[serde(default)]
+    pub auth_token: String,
+
+    #[serde(default)]
+    pub from_number: String,
+}
+
+// ── Generic inbound webhook ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub endpoints: Vec<WebhookEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEndpoint {
+    /// Path segment to match, e.g. `"my-system"` → `POST /webhooks/my-system`
+    pub path: String,
+
+    /// Optional HMAC-SHA256 secret for signature verification.
+    pub secret: Option<String>,
+
+    /// Route all messages from this endpoint as this user_id.
+    pub user_id: String,
+
+    /// JSONPath expression to extract the message text from the body.
+    /// Falls back to the full body when absent.
+    pub extract_text: Option<String>,
+}
+
+// ── Web chat widget ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebchatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    pub welcome_message: Option<String>,
+}
+
+// ── Email (IMAP receive + SMTP send) ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    pub imap: ImapConfig,
+    pub smtp: SmtpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImapConfig {
+    #[serde(default)]
+    pub host: String,
+
+    #[serde(default = "default_imap_port")]
+    pub port: u16,
+
+    #[serde(default)]
+    pub username: String,
+
+    #[serde(default)]
+    pub password: String,
+
+    #[serde(default = "default_inbox")]
+    pub inbox: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpConfig {
+    #[serde(default)]
+    pub host: String,
+
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+
+    #[serde(default)]
+    pub username: String,
+
+    #[serde(default)]
+    pub password: String,
+
+    #[serde(default)]
+    pub from_address: String,
+}
+
+// ── Memory ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Storage backend: `"inmemory"` (default), `"redis"`, `"sqlite"`, `"postgres"`, or `"vector"`.
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+
+    /// Redis connection URL. Required when `backend = "redis"`.
+    pub redis_url: Option<String>,
+
+    /// TTL in seconds for Redis history keys. 0 = no expiry.
+    #[serde(default = "default_redis_ttl")]
+    pub redis_ttl_seconds: u64,
+
+    /// SQLite database file path. Required when `backend = "sqlite"`.
+    pub sqlite_path: Option<String>,
+
+    /// PostgreSQL connection URL. Required when `backend = "postgres"`.
+    pub postgres_url: Option<String>,
+
+    /// Vector store type: `"memory"` (default) or `"qdrant"`.
+    #[serde(default = "default_vector_store")]
+    pub vector_store: String,
+
+    /// URL for external vector store (e.g. Qdrant). Optional.
+    pub vector_store_url: Option<String>,
+
+    /// Embedding provider: `"simple"` (default, deterministic n-gram embeddings).
+    #[serde(default = "default_embedding_provider")]
+    pub embedding_provider: String,
+
+    /// Embedding model name (provider-specific, ignored for "simple").
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model: String,
+
+    /// Memory summarization settings.
+    #[serde(default)]
+    pub summarization: SummarizationConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummarizationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Trigger summarization when history exceeds this many messages.
+    #[serde(default = "default_summarization_trigger_at")]
+    pub trigger_at: usize,
+
+    /// Keep this many recent messages after summarization.
+    #[serde(default = "default_summarization_keep_recent")]
+    pub keep_recent: usize,
+
+    /// LLM model to use for summarization.
+    #[serde(default = "default_summarization_model")]
+    pub model: String,
+}
+
+impl Default for SummarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_at: default_summarization_trigger_at(),
+            keep_recent: default_summarization_keep_recent(),
+            model: default_summarization_model(),
+        }
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_memory_backend(),
+            redis_url: None,
+            redis_ttl_seconds: default_redis_ttl(),
+            sqlite_path: None,
+            postgres_url: None,
+            vector_store: default_vector_store(),
+            vector_store_url: None,
+            embedding_provider: default_embedding_provider(),
+            embedding_model: default_embedding_model(),
+            summarization: SummarizationConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,13 +367,17 @@ pub struct AgentsConfig {
     #[serde(default = "default_planning_max_steps")]
     pub planning_max_steps: usize,
 
-    /// Override the Anthropic API base URL (e.g. for test mock servers).
-    /// When `None`, defaults to `https://api.anthropic.com`.
+    /// Override the API base URL (e.g. for test mock servers or Ollama).
+    /// When `None`, the adapter uses its own default.
     #[serde(default)]
     pub api_base: Option<String>,
+
+    /// AWS region for Bedrock. Defaults to `us-east-1`.
+    pub aws_region: Option<String>,
 }
 
-// Default values
+// ── Default value functions ───────────────────────────────────────────────────
+
 fn default_websocket_port() -> u16 {
     18789
 }
@@ -247,6 +434,46 @@ fn default_telegram_mode() -> String {
     "webhook".to_string()
 }
 
+fn default_slack_mode() -> String {
+    "webhook".to_string()
+}
+
+fn default_imap_port() -> u16 {
+    993
+}
+
+fn default_smtp_port() -> u16 {
+    587
+}
+
+fn default_inbox() -> String {
+    "INBOX".to_string()
+}
+
+fn default_vector_store() -> String {
+    "memory".to_string()
+}
+
+fn default_embedding_provider() -> String {
+    "simple".to_string()
+}
+
+fn default_embedding_model() -> String {
+    "none".to_string()
+}
+
+fn default_summarization_trigger_at() -> usize {
+    40
+}
+
+fn default_summarization_keep_recent() -> usize {
+    20
+}
+
+fn default_summarization_model() -> String {
+    "claude-haiku-4-5-20251001".to_string()
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -258,6 +485,7 @@ impl Default for AgentsConfig {
             planning_enabled: false,
             planning_max_steps: default_planning_max_steps(),
             api_base: None,
+            aws_region: None,
         }
     }
 }
@@ -328,6 +556,75 @@ impl Config {
                 enabled: true,
                 bot_token,
                 signing_secret,
+                app_token: std::env::var("SLACK_APP_TOKEN").ok(),
+                mode: std::env::var("SLACK_MODE").unwrap_or_else(|_| default_slack_mode()),
+            })
+        } else {
+            None
+        };
+
+        let sms = if let (Ok(account_sid), Ok(auth_token), Ok(from_number)) = (
+            std::env::var("TWILIO_ACCOUNT_SID"),
+            std::env::var("TWILIO_AUTH_TOKEN"),
+            std::env::var("TWILIO_FROM_NUMBER"),
+        ) {
+            Some(SmsConfig {
+                enabled: true,
+                auth: SmsAuthConfig {
+                    account_sid,
+                    auth_token,
+                    from_number,
+                },
+            })
+        } else {
+            None
+        };
+
+        let webchat = if std::env::var("WEBCHAT_ENABLED")
+            .ok()
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false)
+        {
+            Some(WebchatConfig {
+                enabled: true,
+                allowed_origins: std::env::var("WEBCHAT_ALLOWED_ORIGINS")
+                    .ok()
+                    .map(|s| s.split(',').map(|o| o.trim().to_string()).collect())
+                    .unwrap_or_default(),
+                welcome_message: std::env::var("WEBCHAT_WELCOME_MESSAGE").ok(),
+            })
+        } else {
+            None
+        };
+
+        let email = if let (Ok(imap_host), Ok(smtp_host), Ok(email_user), Ok(email_pass)) = (
+            std::env::var("EMAIL_IMAP_HOST"),
+            std::env::var("EMAIL_SMTP_HOST"),
+            std::env::var("EMAIL_USERNAME"),
+            std::env::var("EMAIL_PASSWORD"),
+        ) {
+            Some(EmailConfig {
+                enabled: true,
+                imap: ImapConfig {
+                    host: imap_host,
+                    port: std::env::var("EMAIL_IMAP_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_imap_port),
+                    username: email_user.clone(),
+                    password: email_pass.clone(),
+                    inbox: std::env::var("EMAIL_INBOX").unwrap_or_else(|_| default_inbox()),
+                },
+                smtp: SmtpConfig {
+                    host: smtp_host,
+                    port: std::env::var("EMAIL_SMTP_PORT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_smtp_port),
+                    username: email_user,
+                    password: email_pass,
+                    from_address: std::env::var("EMAIL_FROM_ADDRESS").unwrap_or_default(),
+                },
             })
         } else {
             None
@@ -350,9 +647,14 @@ impl Config {
                 whatsapp,
                 telegram,
                 slack,
+                sms,
+                webhook: None, // webhook endpoints not configurable via env vars alone
+                webchat,
+                email,
             },
             agents: AgentsConfig {
-                llm_provider: default_llm_provider(),
+                llm_provider: std::env::var("LLM_PROVIDER")
+                    .unwrap_or_else(|_| default_llm_provider()),
                 llm_model: std::env::var("LLM_MODEL").unwrap_or_else(|_| default_llm_model()),
                 api_key,
                 max_history: default_max_history(),
@@ -366,6 +668,7 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_planning_max_steps),
                 api_base: std::env::var("ANTHROPIC_API_BASE").ok(),
+                aws_region: std::env::var("AWS_REGION").ok(),
             },
             tools: ToolsConfig {
                 enabled: std::env::var("TOOLS_ENABLED")
@@ -395,6 +698,31 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_redis_ttl),
+                sqlite_path: std::env::var("SQLITE_PATH").ok(),
+                postgres_url: std::env::var("DATABASE_URL").ok(),
+                vector_store: std::env::var("VECTOR_STORE")
+                    .unwrap_or_else(|_| default_vector_store()),
+                vector_store_url: std::env::var("VECTOR_STORE_URL").ok(),
+                embedding_provider: std::env::var("EMBEDDING_PROVIDER")
+                    .unwrap_or_else(|_| default_embedding_provider()),
+                embedding_model: std::env::var("EMBEDDING_MODEL")
+                    .unwrap_or_else(|_| default_embedding_model()),
+                summarization: SummarizationConfig {
+                    enabled: std::env::var("SUMMARIZATION_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
+                    trigger_at: std::env::var("SUMMARIZATION_TRIGGER_AT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_summarization_trigger_at),
+                    keep_recent: std::env::var("SUMMARIZATION_KEEP_RECENT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_summarization_keep_recent),
+                    model: std::env::var("SUMMARIZATION_MODEL")
+                        .unwrap_or_else(|_| default_summarization_model()),
+                },
             },
         })
     }

@@ -6,7 +6,10 @@ use crate::agents::AgentManager;
 use crate::channels::Channel;
 use crate::config::Config;
 use crate::gateway::dashboard::MessageStats;
-use crate::memory::{InMemoryStore, MemoryStore, RedisStore};
+use crate::memory::{
+    InMemoryStore, MemorySummarizer, MemoryStore, PostgresStore, RedisStore, SqliteStore,
+    VectorMemoryStore,
+};
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
 use anyhow::Result;
@@ -22,6 +25,7 @@ pub struct Gateway {
     config: Config,
     channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
     memory: Arc<dyn MemoryStore>,
+    summarizer: Option<Arc<MemorySummarizer>>,
     agent_manager: Arc<AgentManager>,
     user_prefs: Arc<UserPreferences>,
     stats: Arc<MessageStats>,
@@ -39,34 +43,108 @@ impl Gateway {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         // Select memory backend based on config
-        let memory: Arc<dyn MemoryStore> = if config.memory.backend == "redis" {
-            match &config.memory.redis_url {
-                Some(url) => {
-                    match RedisStore::new(
-                        url,
-                        config.agents.max_history,
-                        config.memory.redis_ttl_seconds,
-                    ) {
-                        Ok(store) => {
-                            info!("Using Redis memory store (url={})", url);
-                            Arc::new(store)
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to create Redis store, falling back to in-memory: {}",
-                                e
-                            );
-                            Arc::new(InMemoryStore::new(config.agents.max_history))
+        let memory: Arc<dyn MemoryStore> = match config.memory.backend.as_str() {
+            "redis" => {
+                match &config.memory.redis_url {
+                    Some(url) => {
+                        match RedisStore::new(
+                            url,
+                            config.agents.max_history,
+                            config.memory.redis_ttl_seconds,
+                        ) {
+                            Ok(store) => {
+                                info!("Using Redis memory store (url={})", url);
+                                Arc::new(store)
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to create Redis store, falling back to in-memory: {}",
+                                    e
+                                );
+                                Arc::new(InMemoryStore::new(config.agents.max_history))
+                            }
                         }
                     }
-                }
-                None => {
-                    error!("memory.backend=redis but REDIS_URL not set; falling back to in-memory");
-                    Arc::new(InMemoryStore::new(config.agents.max_history))
+                    None => {
+                        error!("memory.backend=redis but REDIS_URL not set; falling back to in-memory");
+                        Arc::new(InMemoryStore::new(config.agents.max_history))
+                    }
                 }
             }
+            "sqlite" => {
+                let path = config
+                    .memory
+                    .sqlite_path
+                    .as_deref()
+                    .unwrap_or("~/.rustynail/memory.db");
+                // Expand ~ manually
+                let expanded = if let Some(rest) = path.strip_prefix("~/") {
+                    dirs_path_expand(rest)
+                } else {
+                    path.to_string()
+                };
+                match SqliteStore::new(&expanded, config.agents.max_history) {
+                    Ok(store) => {
+                        info!("Using SQLite memory store (path={})", expanded);
+                        Arc::new(store)
+                    }
+                    Err(e) => {
+                        error!("Failed to create SQLite store, falling back to in-memory: {}", e);
+                        Arc::new(InMemoryStore::new(config.agents.max_history))
+                    }
+                }
+            }
+            "postgres" => {
+                match &config.memory.postgres_url {
+                    Some(url) => {
+                        match PostgresStore::new(url, config.agents.max_history) {
+                            Ok(store) => {
+                                info!("Using PostgreSQL memory store");
+                                Arc::new(store)
+                            }
+                            Err(e) => {
+                                error!("Failed to create Postgres store, falling back to in-memory: {}", e);
+                                Arc::new(InMemoryStore::new(config.agents.max_history))
+                            }
+                        }
+                    }
+                    None => {
+                        error!("memory.backend=postgres but DATABASE_URL not set; falling back to in-memory");
+                        Arc::new(InMemoryStore::new(config.agents.max_history))
+                    }
+                }
+            }
+            "vector" => {
+                match VectorMemoryStore::new(config.agents.max_history) {
+                    Ok(store) => {
+                        info!("Using vector memory store (in-process, simple embeddings)");
+                        Arc::new(store)
+                    }
+                    Err(e) => {
+                        error!("Failed to create vector store, falling back to in-memory: {}", e);
+                        Arc::new(InMemoryStore::new(config.agents.max_history))
+                    }
+                }
+            }
+            _ => {
+                Arc::new(InMemoryStore::new(config.agents.max_history))
+            }
+        };
+
+        // Build summarizer if enabled
+        let summarizer = if config.memory.summarization.enabled {
+            info!(
+                "Memory summarization enabled (trigger_at={}, keep_recent={})",
+                config.memory.summarization.trigger_at,
+                config.memory.summarization.keep_recent
+            );
+            Some(Arc::new(MemorySummarizer::new(
+                config.memory.summarization.clone(),
+                config.agents.api_key.clone(),
+                config.agents.api_base.clone(),
+            )))
         } else {
-            Arc::new(InMemoryStore::new(config.agents.max_history))
+            None
         };
 
         // Build tool registry from config
@@ -119,6 +197,7 @@ impl Gateway {
             config,
             channels: Arc::new(RwLock::new(Vec::new())),
             memory,
+            summarizer,
             agent_manager,
             user_prefs: Arc::new(UserPreferences::new()),
             stats: MessageStats::new(),
@@ -188,14 +267,71 @@ impl Gateway {
             }
         }
 
-        // Add Slack channel if enabled
+        // Add Slack channel — webhook mode or socket mode
         if let Some(sl_config) = self.config.channels.slack.clone().filter(|c| c.enabled) {
-            info!("Setting up Slack channel");
-            let sl = crate::channels::slack::SlackChannel::new("slack-main".to_string(), sl_config);
-            self.register_channel(Box::new(sl)).await;
+            if sl_config.mode == "socket" {
+                info!("Setting up Slack channel (Socket Mode)");
+                let sl = crate::channels::slack_socketmode::SlackSocketModeChannel::new(
+                    "slack-main".to_string(),
+                    sl_config,
+                    self.message_tx.clone(),
+                );
+                self.register_channel(Box::new(sl)).await;
+            } else {
+                info!("Setting up Slack channel (webhook mode)");
+                let sl =
+                    crate::channels::slack::SlackChannel::new("slack-main".to_string(), sl_config);
+                self.register_channel(Box::new(sl)).await;
+            }
         }
 
-        // Pass WhatsApp webhook sender to HTTP only when WhatsApp is enabled
+        // Add SMS channel if enabled (webhook-based, routes handled by HTTP)
+        if let Some(sms_config) = self.config.channels.sms.clone().filter(|c| c.enabled) {
+            info!("Setting up SMS channel (Twilio webhook mode)");
+            let sms =
+                crate::channels::sms::SmsChannel::new("sms-main".to_string(), sms_config);
+            self.register_channel(Box::new(sms)).await;
+        }
+
+        // Add generic webhook channel if enabled
+        if let Some(wh_config) = self.config.channels.webhook.clone().filter(|c| c.enabled) {
+            info!(
+                "Setting up generic webhook channel ({} endpoints)",
+                wh_config.endpoints.len()
+            );
+            let wh = crate::channels::webhook::WebhookChannel::new(
+                "webhook-main".to_string(),
+                wh_config,
+            );
+            self.register_channel(Box::new(wh)).await;
+        }
+
+        // Add Webchat channel if enabled
+        let webchat_sessions = if let Some(wc_config) =
+            self.config.channels.webchat.clone().filter(|c| c.enabled)
+        {
+            info!("Setting up webchat channel");
+            let wc =
+                crate::channels::webchat::WebchatChannel::new("webchat-main".to_string(), wc_config);
+            let sessions = wc.sessions_handle();
+            self.register_channel(Box::new(wc)).await;
+            Some(sessions)
+        } else {
+            None
+        };
+
+        // Add Email channel if enabled
+        if let Some(em_config) = self.config.channels.email.clone().filter(|c| c.enabled) {
+            info!("Setting up email channel");
+            let em = crate::channels::email::EmailChannel::new(
+                "email-main".to_string(),
+                em_config,
+                self.message_tx.clone(),
+            );
+            self.register_channel(Box::new(em)).await;
+        }
+
+        // Pre-compute sender and config values for HTTP server
         let whatsapp_tx = self
             .config
             .channels
@@ -217,7 +353,7 @@ impl Gateway {
             .channels
             .telegram
             .as_ref()
-            .filter(|c| c.enabled)
+            .filter(|c| c.enabled && c.mode != "longpoll")
             .map(|_| self.message_tx.clone());
 
         let telegram_webhook_secret = self
@@ -233,7 +369,7 @@ impl Gateway {
             .channels
             .slack
             .as_ref()
-            .filter(|c| c.enabled)
+            .filter(|c| c.enabled && c.mode != "socket")
             .map(|_| self.message_tx.clone());
 
         let slack_signing_secret = self
@@ -243,6 +379,41 @@ impl Gateway {
             .as_ref()
             .map(|c| c.signing_secret.clone())
             .unwrap_or_default();
+
+        let sms_tx = self
+            .config
+            .channels
+            .sms
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|_| self.message_tx.clone());
+
+        let sms_auth_token = self
+            .config
+            .channels
+            .sms
+            .as_ref()
+            .map(|c| c.auth.auth_token.clone())
+            .unwrap_or_default();
+
+        let webhook_endpoints = self
+            .config
+            .channels
+            .webhook
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|c| c.endpoints.clone())
+            .unwrap_or_default();
+
+        let webhook_tx = if !webhook_endpoints.is_empty() {
+            Some(self.message_tx.clone())
+        } else {
+            None
+        };
+
+        let webchat_tx = webchat_sessions
+            .as_ref()
+            .map(|_| self.message_tx.clone());
 
         // Pre-compute dashboard basic-auth header value if password is set
         let dashboard_expected_auth = self.config.dashboard.auth_password.as_deref().map(|pw| {
@@ -263,6 +434,12 @@ impl Gateway {
             telegram_webhook_secret,
             slack_tx,
             slack_signing_secret,
+            sms_tx,
+            sms_auth_token,
+            webhook_endpoints,
+            webhook_tx,
+            webchat_sessions,
+            webchat_tx,
             user_prefs: self.user_prefs.clone(),
             stats: self.stats.clone(),
             dashboard_expected_auth,
@@ -287,6 +464,7 @@ impl Gateway {
         // Spawn internal message processing loop
         if let Some(mut rx) = self.message_rx.take() {
             let memory = self.memory.clone();
+            let summarizer = self.summarizer.clone();
             let agent_manager = self.agent_manager.clone();
             let channels = self.channels.clone();
             let user_prefs = self.user_prefs.clone();
@@ -301,6 +479,7 @@ impl Gateway {
                     );
                     if let Err(e) = handle_message_inner(
                         &memory,
+                        &summarizer,
                         &agent_manager,
                         &channels,
                         &user_prefs,
@@ -354,6 +533,7 @@ impl Gateway {
         );
         handle_message_inner(
             &self.memory,
+            &self.summarizer,
             &self.agent_manager,
             &self.channels,
             &self.user_prefs,
@@ -382,12 +562,13 @@ pub async fn handle_message_for_test(
     stats: &Arc<MessageStats>,
     message: Message,
 ) -> Result<()> {
-    handle_message_inner(memory, agent_manager, channels, user_prefs, stats, message).await
+    handle_message_inner(memory, &None, agent_manager, channels, user_prefs, stats, message).await
 }
 
 /// Core message-handling logic shared between the internal loop and public method.
 async fn handle_message_inner(
     memory: &Arc<dyn MemoryStore>,
+    summarizer: &Option<Arc<MemorySummarizer>>,
     agent_manager: &Arc<AgentManager>,
     channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
     user_prefs: &Arc<UserPreferences>,
@@ -410,6 +591,12 @@ async fn handle_message_inner(
 
     // Track in memory store + stats
     memory.add_message(&message.user_id, format!("User: {}", message.content));
+
+    // Maybe summarise history (fire-and-forget)
+    if let Some(ref s) = summarizer {
+        s.maybe_summarize(memory.clone(), &message.user_id);
+    }
+
     stats.record_inbound_async(&message).await;
 
     // Process with agent (record duration for Prometheus histogram)
@@ -444,4 +631,11 @@ async fn handle_message_inner(
         response_channel_id
     );
     Ok(())
+}
+
+/// Expand `~/...` path using the HOME environment variable.
+fn dirs_path_expand(rest: &str) -> String {
+    std::env::var("HOME")
+        .map(|home| format!("{}/{}", home, rest))
+        .unwrap_or_else(|_| format!("/tmp/{}", rest))
 }

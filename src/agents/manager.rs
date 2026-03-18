@@ -4,7 +4,14 @@ use crate::tools::ToolRegistry;
 const SYSTEM_PROMPT: &str = "You are a helpful AI assistant named RustyNail. \
     Be conversational, friendly, and concise. \
     You're chatting with users on Discord and other platforms.";
+
 use agenkit::adapters::anthropic::{AnthropicAgent, AnthropicConfig};
+use agenkit::adapters::bedrock::{BedrockAdapter, BedrockConfig};
+use agenkit::adapters::gemini::{GeminiAdapter, GeminiConfig};
+use agenkit::adapters::litellm::{LiteLLMAdapter, LiteLLMConfig};
+use agenkit::adapters::ollama::{OllamaAgent, OllamaConfig};
+use agenkit::adapters::openai::{OpenAIAgent, OpenAIConfig};
+use agenkit::adapters::openai_compatible::{OpenAICompatibleAgent, OpenAICompatibleConfig};
 use agenkit::core::Agent;
 use agenkit::patterns::planning::{PlanningAgent, PlanningConfig};
 use agenkit::patterns::react::{ReActAgent, ReActConfig};
@@ -86,22 +93,106 @@ impl AgentManager {
         registry.register(tool)
     }
 
-    /// Create a new conversational agent, wrapping with ReActAgent when tools are enabled.
-    async fn create_agent(&self) -> Result<ConversationalAgent> {
-        let anthropic_config = AnthropicConfig {
-            api_key: self.config.api_key.clone(),
-            model: self.config.llm_model.clone(),
-            max_tokens: 1024,
-            temperature: self.config.temperature as f64,
-            api_base: self
-                .config
-                .api_base
-                .clone()
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
-            ..Default::default()
+    /// Create an LLM backend based on the configured `llm_provider`.
+    async fn create_llm(&self) -> Result<Arc<dyn Agent>> {
+        let api_key = self.config.api_key.clone();
+        let model = self.config.llm_model.clone();
+        let temperature = self.config.temperature;
+        let api_base = self.config.api_base.clone();
+
+        let llm: Arc<dyn Agent> = match self.config.llm_provider.as_str() {
+            "openai" => {
+                let config = OpenAIConfig {
+                    api_key,
+                    model,
+                    temperature: temperature as f64,
+                    api_base: api_base
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                    ..Default::default()
+                };
+                Arc::new(OpenAIAgent::new(config))
+            }
+            "ollama" => {
+                let config = OllamaConfig {
+                    model,
+                    temperature: temperature as f64,
+                    api_base: api_base
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    ..Default::default()
+                };
+                Arc::new(OllamaAgent::new(config))
+            }
+            "gemini" => {
+                let config = GeminiConfig {
+                    api_key,
+                    model,
+                    temperature: Some(temperature),
+                    ..Default::default()
+                };
+                Arc::new(
+                    GeminiAdapter::new(config)
+                        .map_err(|e| anyhow::anyhow!("failed to create GeminiAdapter: {}", e))?,
+                )
+            }
+            "bedrock" => {
+                let config = BedrockConfig {
+                    region: self
+                        .config
+                        .aws_region
+                        .clone()
+                        .unwrap_or_else(|| "us-east-1".to_string()),
+                    model,
+                    temperature: Some(temperature),
+                    ..Default::default()
+                };
+                Arc::new(
+                    BedrockAdapter::new(config)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to create BedrockAdapter: {}", e))?,
+                )
+            }
+            "litellm" => {
+                let config = LiteLLMConfig {
+                    model,
+                    api_key: Some(api_key),
+                    base_url: api_base
+                        .unwrap_or_else(|| "http://localhost:4000".to_string()),
+                    temperature: Some(temperature),
+                    ..Default::default()
+                };
+                Arc::new(LiteLLMAdapter::new(config))
+            }
+            "openai-compat" => {
+                let config = OpenAICompatibleConfig {
+                    model,
+                    api_key: Some(api_key),
+                    base_url: api_base
+                        .unwrap_or_else(|| "http://localhost:8000/v1".to_string()),
+                    ..Default::default()
+                };
+                Arc::new(OpenAICompatibleAgent::new(config))
+            }
+            _ => {
+                // Default: Anthropic
+                let config = AnthropicConfig {
+                    api_key,
+                    model,
+                    max_tokens: 1024,
+                    temperature: temperature as f64,
+                    api_base: api_base
+                        .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+                    ..Default::default()
+                };
+                Arc::new(AnthropicAgent::new(config))
+            }
         };
 
-        let llm = Arc::new(AnthropicAgent::new(anthropic_config));
+        Ok(llm)
+    }
+
+    /// Create a new conversational agent, wrapping with ReActAgent when tools are enabled.
+    async fn create_agent(&self) -> Result<ConversationalAgent> {
+        let llm = self.create_llm().await?;
 
         let registry = self.tool_registry.read().await;
         let llm_for_agent: Arc<dyn Agent> = if self.tools_config.enabled && !registry.is_empty() {

@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use rustynail::channels::discord::DiscordChannel;
 use rustynail::config::Config;
 use rustynail::gateway::Gateway;
@@ -37,6 +38,13 @@ enum Commands {
 
     /// Configuration subcommands
     Config(ConfigArgs),
+
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(clap::Args)]
@@ -64,6 +72,7 @@ async fn main() -> Result<()> {
         Commands::Config(args) => match args.command {
             ConfigCommands::Check => cmd_config_check(),
         },
+        Commands::Completions { shell } => cmd_completions(shell),
     }
 }
 
@@ -128,8 +137,8 @@ async fn cmd_start() -> Result<()> {
         }
     }
 
-    // Start the gateway (registers WhatsApp/Telegram/Slack if configured, starts HTTP server
-    // and spawns the internal message processing loop)
+    // Start the gateway (registers all channels, starts HTTP server,
+    // spawns the internal message processing loop)
     gateway.start().await?;
     info!("Gateway started successfully");
     info!("RustyNail is now running. Press Ctrl-C to shutdown.");
@@ -192,9 +201,22 @@ fn cmd_config_check() -> Result<()> {
     println!("  HTTP port:        {}", config.gateway.http_port);
     println!("  WebSocket port:   {}", config.gateway.websocket_port);
     println!("  Log level:        {}", config.gateway.log_level);
+    println!("  LLM provider:     {}", config.agents.llm_provider);
     println!("  LLM model:        {}", config.agents.llm_model);
     println!("  Memory backend:   {}", config.memory.backend);
     println!("  Tools enabled:    {}", config.tools.enabled);
+    println!(
+        "  Summarization:    {}",
+        if config.memory.summarization.enabled {
+            format!(
+                "enabled (trigger_at={}, keep_recent={})",
+                config.memory.summarization.trigger_at,
+                config.memory.summarization.keep_recent
+            )
+        } else {
+            "disabled".to_string()
+        }
+    );
     println!(
         "  OTel endpoint:    {}",
         config.otel.endpoint.as_deref().unwrap_or("(disabled)")
@@ -229,7 +251,26 @@ fn cmd_config_check() -> Result<()> {
         }
     }
     if config.channels.slack.as_ref().is_some_and(|c| c.enabled) {
-        channels.push("slack");
+        let mode = config
+            .channels
+            .slack
+            .as_ref()
+            .map(|c| c.mode.as_str())
+            .unwrap_or("webhook");
+        if mode == "socket" {
+            channels.push("slack (socket mode)");
+        } else {
+            channels.push("slack (webhook)");
+        }
+    }
+    if config.channels.sms.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("sms");
+    }
+    if config.channels.webchat.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("webchat");
+    }
+    if config.channels.email.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("email");
     }
     if channels.is_empty() {
         println!("  Channels:         (none configured)");
@@ -237,5 +278,11 @@ fn cmd_config_check() -> Result<()> {
         println!("  Channels:         {}", channels.join(", "));
     }
 
+    Ok(())
+}
+
+/// `rustynail completions <shell>` — print shell completion script.
+fn cmd_completions(shell: Shell) -> Result<()> {
+    clap_complete::generate(shell, &mut Cli::command(), "rustynail", &mut std::io::stdout());
     Ok(())
 }

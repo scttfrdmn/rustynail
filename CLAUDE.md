@@ -121,6 +121,7 @@ cargo fmt
 | v0.4.0 | Production Infrastructure — Docker, CI/CD, web dashboard | Closed (released 2026-03-17) |
 | v0.4.5 | Config flexibility + integration test suite | Closed (released 2026-03-18) |
 | v0.5.0 | BuckTooth parity — Prometheus, Redis, long-poll, tools, WS dashboard, CLI, distroless | Closed (released 2026-03-18) |
+| v0.6.0 | OpenClaw parity — multi-LLM, SQLite/Postgres/vector memory, summarization, SMS, webhook, webchat, email, Slack Socket Mode, shell completion, Grafana | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview
