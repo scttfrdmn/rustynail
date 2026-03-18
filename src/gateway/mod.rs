@@ -1,9 +1,11 @@
+pub mod dashboard;
 pub mod http;
 pub mod user_prefs;
 
 use crate::agents::AgentManager;
 use crate::channels::Channel;
 use crate::config::Config;
+use crate::gateway::dashboard::MessageStats;
 use crate::memory::{InMemoryStore, MemoryStore};
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
@@ -22,6 +24,7 @@ pub struct Gateway {
     memory: Arc<dyn MemoryStore>,
     agent_manager: Arc<AgentManager>,
     user_prefs: Arc<UserPreferences>,
+    stats: Arc<MessageStats>,
     event_tx: broadcast::Sender<GatewayEvent>,
     _event_rx: broadcast::Receiver<GatewayEvent>,
     tasks: Vec<JoinHandle<()>>,
@@ -76,6 +79,7 @@ impl Gateway {
             memory,
             agent_manager,
             user_prefs: Arc::new(UserPreferences::new()),
+            stats: MessageStats::new(),
             event_tx,
             _event_rx: event_rx,
             tasks: Vec::new(),
@@ -188,27 +192,32 @@ impl Gateway {
             .map(|c| c.signing_secret.clone())
             .unwrap_or_default();
 
+        // Pre-compute dashboard basic-auth header value if password is set
+        let dashboard_expected_auth = self.config.dashboard.auth_password.as_deref().map(|pw| {
+            use base64::Engine;
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("rustynail:{}", pw));
+            format!("Basic {}", encoded)
+        });
+
         // Start HTTP server
-        let http_port = self.config.gateway.http_port;
-        let channels_clone = self.channels.clone();
-        let agent_manager_clone = self.agent_manager.clone();
-        let user_prefs_clone = self.user_prefs.clone();
+        let http_cfg = http::HttpServerConfig {
+            port: self.config.gateway.http_port,
+            channels: self.channels.clone(),
+            agent_manager: self.agent_manager.clone(),
+            whatsapp_tx,
+            whatsapp_verify_token,
+            telegram_tx,
+            telegram_webhook_secret,
+            slack_tx,
+            slack_signing_secret,
+            user_prefs: self.user_prefs.clone(),
+            stats: self.stats.clone(),
+            dashboard_expected_auth,
+        };
 
         let http_task = tokio::spawn(async move {
-            if let Err(e) = http::start_http_server(
-                http_port,
-                channels_clone,
-                agent_manager_clone,
-                whatsapp_tx,
-                whatsapp_verify_token,
-                telegram_tx,
-                telegram_webhook_secret,
-                slack_tx,
-                slack_signing_secret,
-                user_prefs_clone,
-            )
-            .await
-            {
+            if let Err(e) = http::start_http_server(http_cfg).await {
                 error!("HTTP server error: {}", e);
             }
         });
@@ -229,6 +238,7 @@ impl Gateway {
             let agent_manager = self.agent_manager.clone();
             let channels = self.channels.clone();
             let user_prefs = self.user_prefs.clone();
+            let stats = self.stats.clone();
 
             let msg_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
@@ -242,6 +252,7 @@ impl Gateway {
                         &agent_manager,
                         &channels,
                         &user_prefs,
+                        &stats,
                         message,
                     )
                     .instrument(span)
@@ -294,6 +305,7 @@ impl Gateway {
             &self.agent_manager,
             &self.channels,
             &self.user_prefs,
+            &self.stats,
             message,
         )
         .instrument(span)
@@ -315,6 +327,7 @@ async fn handle_message_inner(
     agent_manager: &Arc<AgentManager>,
     channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
     user_prefs: &Arc<UserPreferences>,
+    stats: &Arc<MessageStats>,
     message: Message,
 ) -> Result<()> {
     info!(
@@ -331,8 +344,9 @@ async fn handle_message_inner(
         message.channel_id.clone()
     };
 
-    // Track in memory store
+    // Track in memory store + stats
     memory.add_message(&message.user_id, format!("User: {}", message.content));
+    stats.record_inbound_async(&message).await;
 
     // Process with agent
     let response_content = agent_manager
@@ -353,7 +367,8 @@ async fn handle_message_inner(
     let channels = channels.read().await;
     for channel in channels.iter() {
         if channel.id() == response_channel_id {
-            channel.send_message(response).await?;
+            channel.send_message(response.clone()).await?;
+            stats.record_outbound_async(&response).await;
             return Ok(());
         }
     }

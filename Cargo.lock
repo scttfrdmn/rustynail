@@ -3226,12 +3226,13 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rustynail"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agenkit",
  "anyhow",
  "async-trait",
  "axum 0.7.9",
+ "base64 0.22.1",
  "chrono",
  "config",
  "dotenvy",

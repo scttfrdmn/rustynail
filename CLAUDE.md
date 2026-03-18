@@ -117,8 +117,10 @@ cargo fmt
 |-----------|-------------|--------|
 | v0.1.0 | Foundation — core types, Discord, Agenkit, HTTP | Closed (released 2026-02-01) |
 | v0.2.0 | Tools & Multi-Channel — tool registry, WhatsApp | Open |
-| v0.3.0 | Platform Expansion — Telegram, Slack, OpenTelemetry | Open |
-| v1.0.0 | Production Ready — Docker, K8s, web dashboard | Open |
+| v0.3.0 | Platform Expansion — Telegram, Slack, OpenTelemetry | Closed (released 2026-03-17) |
+| v0.4.0 | Production Infrastructure — Docker, CI/CD, web dashboard | Open |
+| v0.5.0 | K8s manifests, migration tool | Open |
+| v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview
 

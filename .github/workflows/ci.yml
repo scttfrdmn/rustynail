@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout rustynail
+        uses: actions/checkout@v4
+        with:
+          path: rustynail
+
+      - name: Checkout agenkit (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: scttfrdmn/agenkit
+          path: agenkit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rustynail/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rustynail/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        working-directory: rustynail
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rustynail
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        working-directory: rustynail
+        run: cargo test

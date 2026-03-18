@@ -40,9 +40,7 @@ impl MemoryStore for InMemoryStore {
 
     fn add_message(&self, user_id: &str, message: String) {
         let mut histories = self.histories.write().unwrap();
-        let history = histories
-            .entry(user_id.to_string())
-            .or_insert_with(Vec::new);
+        let history = histories.entry(user_id.to_string()).or_default();
 
         history.push(message);
 

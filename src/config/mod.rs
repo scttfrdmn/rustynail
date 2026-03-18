@@ -10,6 +10,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub otel: OtelConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +92,11 @@ pub struct OtelConfig {
 
     #[serde(default = "default_otel_service_name")]
     pub service_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DashboardConfig {
+    pub auth_password: Option<String>,
 }
 
 impl Default for OtelConfig {
@@ -327,6 +334,9 @@ impl Config {
                 endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
                 service_name: std::env::var("OTEL_SERVICE_NAME")
                     .unwrap_or_else(|_| default_otel_service_name()),
+            },
+            dashboard: DashboardConfig {
+                auth_password: std::env::var("DASHBOARD_AUTH_PASSWORD").ok(),
             },
         })
     }

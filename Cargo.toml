@@ -1,6 +1,6 @@
 [package]
 name = "rustynail"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
 description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"
@@ -50,6 +50,7 @@ reqwest = { version = "0.11", features = ["json"] }
 # Utilities
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
 
 # Slack signature verification
 hmac = "0.12"

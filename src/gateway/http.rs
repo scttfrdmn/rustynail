@@ -5,6 +5,7 @@ use crate::channels::slack::{
 use crate::channels::telegram::{parse_update, TelegramUpdate};
 use crate::channels::whatsapp::{parse_webhook, WebhookBody};
 use crate::channels::Channel;
+use crate::gateway::dashboard::MessageStats;
 use crate::gateway::user_prefs::UserPreferences;
 use crate::types::Message;
 use axum::{
@@ -20,6 +21,22 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
+/// Configuration for starting the HTTP server.
+pub struct HttpServerConfig {
+    pub port: u16,
+    pub channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
+    pub agent_manager: Arc<AgentManager>,
+    pub whatsapp_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub whatsapp_verify_token: String,
+    pub telegram_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub telegram_webhook_secret: String,
+    pub slack_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub slack_signing_secret: String,
+    pub user_prefs: Arc<UserPreferences>,
+    pub stats: Arc<MessageStats>,
+    pub dashboard_expected_auth: Option<String>,
+}
+
 /// HTTP server state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -32,6 +49,8 @@ pub struct AppState {
     pub slack_tx: Option<mpsc::UnboundedSender<Message>>,
     pub slack_signing_secret: String,
     pub user_prefs: Arc<UserPreferences>,
+    pub stats: Arc<MessageStats>,
+    pub dashboard_expected_auth: Option<String>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────
@@ -348,44 +367,45 @@ pub fn create_router(state: AppState) -> Router {
         // User preferences
         .route("/users/:user_id/preferences", get(get_user_preferences))
         .route("/users/:user_id/preferences", post(set_user_preferences))
+        // Dashboard
+        .route(
+            "/dashboard",
+            get(crate::gateway::dashboard::dashboard_html_handler),
+        )
+        .route(
+            "/dashboard/data",
+            get(crate::gateway::dashboard::dashboard_data_handler),
+        )
         .with_state(state)
 }
 
-pub async fn start_http_server(
-    port: u16,
-    channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
-    agent_manager: Arc<AgentManager>,
-    whatsapp_tx: Option<mpsc::UnboundedSender<Message>>,
-    whatsapp_verify_token: String,
-    telegram_tx: Option<mpsc::UnboundedSender<Message>>,
-    telegram_webhook_secret: String,
-    slack_tx: Option<mpsc::UnboundedSender<Message>>,
-    slack_signing_secret: String,
-    user_prefs: Arc<UserPreferences>,
-) -> anyhow::Result<()> {
+pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
     let state = AppState {
-        channels,
-        agent_manager,
-        whatsapp_tx,
-        whatsapp_verify_token,
-        telegram_tx,
-        telegram_webhook_secret,
-        slack_tx,
-        slack_signing_secret,
-        user_prefs,
+        channels: cfg.channels,
+        agent_manager: cfg.agent_manager,
+        whatsapp_tx: cfg.whatsapp_tx,
+        whatsapp_verify_token: cfg.whatsapp_verify_token,
+        telegram_tx: cfg.telegram_tx,
+        telegram_webhook_secret: cfg.telegram_webhook_secret,
+        slack_tx: cfg.slack_tx,
+        slack_signing_secret: cfg.slack_signing_secret,
+        user_prefs: cfg.user_prefs,
+        stats: cfg.stats,
+        dashboard_expected_auth: cfg.dashboard_expected_auth,
     };
 
     let app = create_router(state);
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", cfg.port);
 
     info!("HTTP server starting on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
-    info!("  Health:   http://localhost:{}/health", port);
-    info!("  Status:   http://localhost:{}/status", port);
-    info!("  Metrics:  http://localhost:{}/metrics", port);
-    info!("  Ready:    http://localhost:{}/ready", port);
-    info!("  Live:     http://localhost:{}/live", port);
+    info!("  Health:     http://localhost:{}/health", cfg.port);
+    info!("  Status:     http://localhost:{}/status", cfg.port);
+    info!("  Metrics:    http://localhost:{}/metrics", cfg.port);
+    info!("  Ready:      http://localhost:{}/ready", cfg.port);
+    info!("  Live:       http://localhost:{}/live", cfg.port);
+    info!("  Dashboard:  http://localhost:{}/dashboard", cfg.port);
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -409,6 +429,8 @@ mod tests {
             slack_tx: None,
             slack_signing_secret: String::new(),
             user_prefs: Arc::new(UserPreferences::new()),
+            stats: MessageStats::new(),
+            dashboard_expected_auth: None,
         }
     }
 

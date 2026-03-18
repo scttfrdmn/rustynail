@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-17
+
+### Added
+- Multi-stage `Dockerfile` (`rust:1.82-slim-bookworm` builder → `debian:bookworm-slim` runtime) for producing a minimal production image
+- `docker-compose.yml` for local development; build context is the parent directory to resolve the local `agenkit` path dependency
+- `.dockerignore` excluding `target/`, `.env`, `.git/`, and `diary/` from the build context
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`): runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test` on push/PR to `main`; dual checkout of `rustynail` + `agenkit` sibling repos
+- GitHub Actions Docker workflow (`.github/workflows/docker.yml`): builds and pushes to `ghcr.io/scttfrdmn/rustynail` on `v*` tag push
+- Web monitoring dashboard at `GET /dashboard` (embedded HTML/CSS/JS, no CDN) with 30-second auto-refresh
+- `GET /dashboard/data` JSON endpoint returning version, uptime, message counters, active users, channel health, and a recent-messages ring buffer (last 50)
+- `MessageStats` struct with atomic counters (`messages_in`, `messages_out`) and a `RwLock<VecDeque<RecentMessage>>` ring buffer; threaded through the gateway message loop and `handle_message_inner`
+- Optional HTTP basic auth on dashboard endpoints via `DASHBOARD_AUTH_PASSWORD` env var; credentials are `rustynail:<password>`
+- `DashboardConfig` struct in the configuration system with `DASHBOARD_AUTH_PASSWORD` env var support
+- `HttpServerConfig` struct replacing the 10-positional-argument `start_http_server` signature
+
+## [0.3.0] - 2026-03-17
+
 ### Added
 - Telegram Bot API channel adapter: webhook receive (POST with `X-Telegram-Bot-Api-Secret-Token` auth) and `sendMessage` REST send
 - Slack Events API channel adapter: webhook receive (HMAC-SHA256 signature verification, `url_verification` challenge handling) and `chat.postMessage` REST send
@@ -45,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/scttfrdmn/rustynail/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/scttfrdmn/rustynail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scttfrdmn/rustynail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scttfrdmn/rustynail/releases/tag/v0.1.0

@@ -4,7 +4,7 @@
 
 RustyNail is a high-performance personal AI assistant built with Rust and Agenkit-Rust. It connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact with it naturally through chat.
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.1.0)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.4.0)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)](https://github.com/scttfrdmn/rustynail)
@@ -122,6 +122,23 @@ RustyNail provides comprehensive health and monitoring endpoints:
 
 - **`GET /ready`** - Readiness probe (returns 503 if not ready)
 - **`GET /live`** - Liveness probe (for Kubernetes)
+- **`GET /dashboard`** - Web monitoring dashboard (HTML)
+- **`GET /dashboard/data`** - Dashboard JSON data endpoint
+
+### Dashboard
+
+The web dashboard provides real-time monitoring at `http://localhost:8080/dashboard`:
+
+- Message counters (in/out), active users, uptime, message rate
+- Channel health table with running status
+- Recent messages ring buffer (last 50)
+
+Optional basic auth — set `DASHBOARD_AUTH_PASSWORD` to require a password:
+
+```bash
+DASHBOARD_AUTH_PASSWORD=secret cargo run
+# Credentials: rustynail / <password>
+```
 
 ### Testing Endpoints
 
@@ -191,7 +208,40 @@ rustynail/
 └── README.md                # This file
 ```
 
-### Building
+## Container Deployment
+
+The build context must be the **parent** directory of `rustynail/` because `agenkit` is a local
+path dependency at `../agenkit/agenkit-rust`.
+
+### Docker (manual)
+
+```bash
+# Build from the parent directory
+docker buildx build -f rustynail/Dockerfile -t rustynail:latest ..
+
+# Run
+docker run --rm \
+  -e DISCORD_BOT_TOKEN=... \
+  -e ANTHROPIC_API_KEY=... \
+  -p 8080:8080 \
+  rustynail:latest
+```
+
+### docker-compose
+
+```bash
+# From the parent directory (one level above rustynail/)
+cd ..
+DISCORD_BOT_TOKEN=... ANTHROPIC_API_KEY=... docker-compose -f rustynail/docker-compose.yml up
+```
+
+A pre-built image is published to GitHub Container Registry on every version tag:
+
+```bash
+docker pull ghcr.io/scttfrdmn/rustynail:latest
+```
+
+### Development
 
 ```bash
 # Debug build

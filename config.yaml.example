@@ -35,3 +35,9 @@ agents:
 
   # Temperature for responses (0.0 - 1.0)
   temperature: 0.7
+
+# Dashboard configuration (optional)
+dashboard:
+  # Uncomment to require HTTP basic auth on /dashboard and /dashboard/data.
+  # Credentials will be: rustynail / <your password>
+  # auth_password: changeme

@@ -1,0 +1,10 @@
+rustynail/target/
+target/
+rustynail/diary/
+diary/
+.env
+.env.*
+**/.git/
+.git/
+*.md
+!rustynail/README.md
