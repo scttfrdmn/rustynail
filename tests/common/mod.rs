@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
+use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, DeduplicationConfig, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
 use rustynail::gateway::rate_limiter::RateLimiter;
@@ -26,6 +26,11 @@ pub fn make_test_config() -> Config {
             request_timeout_seconds: 30,
             allowed_ws_origins: Vec::new(),
             shutdown_timeout_seconds: 30,
+            chunking_enabled: false,
+            chunking_limits: std::collections::HashMap::new(),
+            formatting_enabled: false,
+            auto_route_attachments: false,
+            deduplication: DeduplicationConfig::default(),
         },
         channels: ChannelsConfig {
             discord: None,

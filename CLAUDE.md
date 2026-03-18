@@ -125,7 +125,7 @@ Before drafting a milestone plan:
 2. List each gap with the source project (`BuckTooth`, `OpenClaw`, or `Both`) and a short description.
 3. Assign gaps to the milestone or a future one, and create GitHub issues for each.
 
-### Parity status (as of v0.8.0)
+### Parity status (as of v0.11.0)
 
 | Feature area | BuckTooth | OpenClaw | Notes |
 |---|---|---|---|
@@ -174,6 +174,12 @@ Before drafting a milestone plan:
 | Cron scheduler | ✅ | — | |
 | `gateway.allowed_ws_origins` | ✅ | — | |
 | `gateway.shutdown_timeout_seconds` | ✅ | — | |
+| Message chunking (platform limits) | ✅ | — | |
+| Message deduplication | ✅ | — | |
+| Channel-aware response formatting | ✅ | — | |
+| Attachment auto-routing | ✅ | — | |
+| LLM retry jitter | ✅ | — | |
+| LLM provider fallback chain | ✅ | — | |
 
 Update this table at the start of each milestone planning session.
 
@@ -192,6 +198,7 @@ Update this table at the start of each milestone planning session.
 | v0.8.0 | BuckTooth Full Parity + Agent Skills — bearer token auth, web fetch tool, shell tool, MS Teams, Helm, benchmarks, zero-credential harness, skills | Closed (released 2026-03-18) |
 | v0.9.0 | Production Hardening — rate limiting, audit logging, body limits, timeouts, security metrics, SIGHUP hot-reload, LLM retry resilience | Closed (released 2026-03-18) |
 | v0.10.0 | BuckTooth Remaining Gaps — PDF analysis, image analysis, Admin API, Cron scheduler, WS origin restriction, configurable shutdown timeout | Closed (released 2026-03-18) |
+| v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview

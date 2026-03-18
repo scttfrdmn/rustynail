@@ -1,3 +1,4 @@
+use crate::agents::fallback::FallbackAgent;
 use crate::config::{AgentRetryConfig, AgentsConfig, ToolsConfig};
 use crate::gateway::dashboard::MessageStats;
 use crate::tools::ToolRegistry;
@@ -134,39 +135,94 @@ impl AgentManager {
     }
 
     /// Create an LLM backend based on the configured `llm_provider`.
+    ///
+    /// When fallback providers are configured the primary is wrapped in a
+    /// `FallbackAgent` that tries each fallback in order on capacity errors.
     async fn create_llm(&self) -> Result<Arc<dyn Agent>> {
-        let api_key = self.config.api_key.clone();
-        let model = self.config.llm_model.clone();
-        let temperature = self.config.temperature;
-        let api_base = self.config.api_base.clone();
+        let primary = self.create_llm_from_config(
+            &self.config.api_key,
+            &self.config.llm_model,
+            self.config.temperature,
+            self.config.api_base.as_deref(),
+            self.config.aws_region.as_deref(),
+            &self.config.llm_provider,
+        )
+        .await?;
 
-        let llm: Arc<dyn Agent> = match self.config.llm_provider.as_str() {
+        if self.config.fallback_providers.is_empty() {
+            return Ok(primary);
+        }
+
+        let mut fallbacks: Vec<Arc<dyn Agent>> = Vec::new();
+        for fb_cfg in &self.config.fallback_providers {
+            match self
+                .create_llm_from_config(
+                    &fb_cfg.api_key,
+                    &fb_cfg.model,
+                    self.config.temperature,
+                    fb_cfg.api_base.as_deref(),
+                    None,
+                    &fb_cfg.provider,
+                )
+                .await
+            {
+                Ok(agent) => fallbacks.push(agent),
+                Err(e) => {
+                    tracing::warn!("Failed to create fallback LLM '{}': {}", fb_cfg.provider, e)
+                }
+            }
+        }
+
+        if fallbacks.is_empty() {
+            return Ok(primary);
+        }
+
+        info!(
+            "FallbackAgent configured with {} fallback provider(s)",
+            fallbacks.len()
+        );
+        Ok(Arc::new(FallbackAgent::new(primary, fallbacks)))
+    }
+
+    /// Build a single LLM adapter from explicit parameters.
+    async fn create_llm_from_config(
+        &self,
+        api_key: &str,
+        model: &str,
+        temperature: f32,
+        api_base: Option<&str>,
+        aws_region: Option<&str>,
+        provider: &str,
+    ) -> Result<Arc<dyn Agent>> {
+        let llm: Arc<dyn Agent> = match provider {
             "stub" => Arc::new(StubAgent::new()),
             "openai" => {
                 let config = OpenAIConfig {
-                    api_key,
-                    model,
+                    api_key: api_key.to_string(),
+                    model: model.to_string(),
                     temperature: temperature as f64,
                     api_base: api_base
-                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                        .unwrap_or("https://api.openai.com/v1")
+                        .to_string(),
                     ..Default::default()
                 };
                 Arc::new(OpenAIAgent::new(config))
             }
             "ollama" => {
                 let config = OllamaConfig {
-                    model,
+                    model: model.to_string(),
                     temperature: temperature as f64,
                     api_base: api_base
-                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                        .unwrap_or("http://localhost:11434")
+                        .to_string(),
                     ..Default::default()
                 };
                 Arc::new(OllamaAgent::new(config))
             }
             "gemini" => {
                 let config = GeminiConfig {
-                    api_key,
-                    model,
+                    api_key: api_key.to_string(),
+                    model: model.to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
@@ -177,12 +233,8 @@ impl AgentManager {
             }
             "bedrock" => {
                 let config = BedrockConfig {
-                    region: self
-                        .config
-                        .aws_region
-                        .clone()
-                        .unwrap_or_else(|| "us-east-1".to_string()),
-                    model,
+                    region: aws_region.unwrap_or("us-east-1").to_string(),
+                    model: model.to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
@@ -194,10 +246,11 @@ impl AgentManager {
             }
             "litellm" => {
                 let config = LiteLLMConfig {
-                    model,
-                    api_key: Some(api_key),
+                    model: model.to_string(),
+                    api_key: Some(api_key.to_string()),
                     base_url: api_base
-                        .unwrap_or_else(|| "http://localhost:4000".to_string()),
+                        .unwrap_or("http://localhost:4000")
+                        .to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
@@ -205,10 +258,11 @@ impl AgentManager {
             }
             "openai-compat" => {
                 let config = OpenAICompatibleConfig {
-                    model,
-                    api_key: Some(api_key),
+                    model: model.to_string(),
+                    api_key: Some(api_key.to_string()),
                     base_url: api_base
-                        .unwrap_or_else(|| "http://localhost:8000/v1".to_string()),
+                        .unwrap_or("http://localhost:8000/v1")
+                        .to_string(),
                     ..Default::default()
                 };
                 Arc::new(OpenAICompatibleAgent::new(config))
@@ -216,12 +270,13 @@ impl AgentManager {
             _ => {
                 // Default: Anthropic
                 let config = AnthropicConfig {
-                    api_key,
-                    model,
+                    api_key: api_key.to_string(),
+                    model: model.to_string(),
                     max_tokens: 1024,
                     temperature: temperature as f64,
                     api_base: api_base
-                        .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+                        .unwrap_or("https://api.anthropic.com")
+                        .to_string(),
                     ..Default::default()
                 };
                 Arc::new(AnthropicAgent::new(config))
@@ -334,12 +389,23 @@ impl AgentManager {
 
         for attempt in 0..max_attempts {
             if attempt > 0 {
-                // Record retry metric and apply exponential backoff
+                // Record retry metric and apply exponential backoff (+ optional jitter)
                 if let Some(ref stats) = self.stats {
                     stats.record_llm_retry();
                 }
-                let delay_ms = self.retry_config.base_delay_ms
+                let base = self.retry_config.base_delay_ms
                     * 2u64.saturating_pow(attempt - 1);
+                let delay_ms = if self.retry_config.jitter_enabled {
+                    // ±20%: factor in [0.8, 1.2)
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos())
+                        .unwrap_or(0);
+                    let jitter = 0.8 + (nanos % 400) as f64 / 1000.0;
+                    (base as f64 * jitter) as u64
+                } else {
+                    base
+                };
                 tracing::warn!(
                     "LLM attempt {}/{} for user '{}' failed, retrying in {}ms",
                     attempt,

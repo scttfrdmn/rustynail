@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-18
+
+### Added
+- `Attachment` struct in `src/types.rs` (`url`, `media_type`, `filename`) — replaces the `Vec<String>` attachments field on `Message` with typed `Vec<Attachment>`; prerequisite for attachment auto-routing
+- Message chunking: `MessageChunker` in `src/gateway/chunker.rs` splits long responses at whitespace boundaries; configured via `gateway.chunking_enabled` (env: `GATEWAY_CHUNKING_ENABLED`) and `gateway.chunking_limits` map (file-only); built-in per-platform defaults: discord → 2000, slack → 4000, teams → 1024, telegram/whatsapp → 4096
+- Message deduplication: `MessageDeduplicator` in `src/gateway/deduplicator.rs` uses a SHA-256 ring buffer to drop duplicate `(user_id, content)` pairs within a sliding window; configured via `gateway.deduplication.enabled` (env: `GATEWAY_DEDUP_ENABLED`) and `gateway.deduplication.window_size` (env: `GATEWAY_DEDUP_WINDOW_SIZE`; default 256); deduplication runs at the very top of the pipeline before any processing
+- Channel-aware response formatting: `ResponseFormatter` in `src/gateway/formatter.rs` converts standard markdown to platform-native syntax; enabled by `gateway.formatting_enabled` (env: `GATEWAY_FORMATTING_ENABLED`; default true); rules: Slack `**bold**` → `*bold*`, links → `<url|text>`; Telegram `**bold**` → `*bold*` + MarkdownV2 special-char escaping; WhatsApp `**bold**` → `*bold*`, links → `text (url)`; Discord/Teams: pass-through; code blocks are protected from inline substitution
+- Attachment auto-routing: when `gateway.auto_route_attachments` (env: `GATEWAY_AUTO_ROUTE_ATTACHMENTS`) is enabled, `pdf` attachments prepend "Please analyze this PDF: {url}" to the agent prompt, and `image` attachments prepend "Please describe this image: {url}"
+- LLM retry jitter: `agents.retry.jitter_enabled` (env: `AGENT_RETRY_JITTER_ENABLED`; default false) applies ±20% randomization to exponential backoff delays, reducing retry storms
+- LLM provider fallback chain: `FallbackAgent` in `src/agents/fallback.rs` wraps the primary provider; on capacity/overload errors (HTTP 500, 503, "overloaded", "model not found") each configured fallback is tried in order; 429 rate-limit errors are not forwarded (handled by caller retry); fallbacks configured via `agents.fallback_providers` list in YAML (file-only)
+- `DeduplicationConfig` struct with `enabled` and `window_size` fields; `FallbackProviderConfig` struct with `provider`, `model`, `api_key`, `api_base` fields
+
+### Changed
+- `Cargo.toml` bumped to `0.11.0`
+- `Message.attachments` changed from `Vec<String>` to `Vec<Attachment>`; `Message::with_attachments()` updated accordingly
+- `GatewayConfig` extended with `chunking_enabled`, `chunking_limits`, `formatting_enabled`, `auto_route_attachments`, `deduplication`
+- `AgentRetryConfig` extended with `jitter_enabled: bool`
+- `AgentsConfig` extended with `fallback_providers: Vec<FallbackProviderConfig>`
+- `AgentManager::create_llm()` refactored into `create_llm()` (public pipeline entry) + `create_llm_from_config()` (parameterised builder); wraps primary with `FallbackAgent` when fallback providers are present
+- `handle_message_inner()` pipeline order: deduplication → audit → rate limiting → attachment routing → agent call → response formatting → chunked send
+- `gateway/mod.rs` extended with `pub mod chunker`, `pub mod deduplicator`, `pub mod formatter`
+- `agents/mod.rs` extended with `pub mod fallback`
+- `lib.rs` now re-exports `Attachment` alongside `Message`
+
 ## [0.10.0] - 2026-03-18
 
 ### Added

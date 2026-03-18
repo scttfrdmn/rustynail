@@ -1,6 +1,6 @@
 [package]
 name = "rustynail"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
 description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"

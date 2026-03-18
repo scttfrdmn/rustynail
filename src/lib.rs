@@ -11,4 +11,4 @@ pub mod types;
 
 pub use channels::Channel;
 pub use gateway::Gateway;
-pub use types::{ChannelHealth, GatewayEvent, Message};
+pub use types::{Attachment, ChannelHealth, GatewayEvent, Message};

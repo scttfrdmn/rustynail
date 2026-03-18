@@ -1,4 +1,7 @@
+pub mod chunker;
 pub mod dashboard;
+pub mod deduplicator;
+pub mod formatter;
 pub mod http;
 pub mod rate_limiter;
 pub mod user_prefs;
@@ -8,7 +11,10 @@ use crate::audit::{AuditEvent, AuditLogger};
 use crate::channels::Channel;
 use crate::config::{Config, RateLimitConfig, SkillsConfig};
 use crate::cron::CronScheduler;
+use crate::gateway::chunker::MessageChunker;
 use crate::gateway::dashboard::MessageStats;
+use crate::gateway::deduplicator::MessageDeduplicator;
+use crate::gateway::formatter::ResponseFormatter;
 use crate::gateway::rate_limiter::RateLimiter;
 use crate::memory::{
     InMemoryStore, MemorySummarizer, MemoryStore, PostgresStore, RedisStore, SqliteStore,
@@ -19,7 +25,7 @@ use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn, Instrument};
 
@@ -115,6 +121,14 @@ pub struct Gateway {
     cron_scheduler: Option<CronScheduler>,
     /// Skills config snapshot (for admin /skills/reload).
     skills_config: SkillsConfig,
+    /// Message deduplicator (None when disabled).
+    deduplicator: Option<Arc<Mutex<MessageDeduplicator>>>,
+    /// Message chunker (None when disabled).
+    chunker: Option<Arc<MessageChunker>>,
+    /// Response formatter.
+    formatter: Arc<ResponseFormatter>,
+    /// Auto-route attachments to PDF/image tool prompts.
+    auto_route_attachments: bool,
 }
 
 impl Gateway {
@@ -381,6 +395,34 @@ impl Gateway {
 
         let skills_config = config.skills.clone();
 
+        // Build deduplicator
+        let deduplicator = if config.gateway.deduplication.enabled {
+            info!(
+                "Message deduplication enabled (window={})",
+                config.gateway.deduplication.window_size
+            );
+            Some(Arc::new(Mutex::new(MessageDeduplicator::new(
+                config.gateway.deduplication.window_size,
+            ))))
+        } else {
+            None
+        };
+
+        // Build chunker
+        let chunker = if config.gateway.chunking_enabled {
+            info!("Message chunking enabled");
+            Some(Arc::new(MessageChunker::new(
+                config.gateway.chunking_limits.clone(),
+            )))
+        } else {
+            None
+        };
+
+        // Build formatter
+        let formatter = Arc::new(ResponseFormatter::new(config.gateway.formatting_enabled));
+
+        let auto_route_attachments = config.gateway.auto_route_attachments;
+
         Self {
             config,
             channels: Arc::new(RwLock::new(Vec::new())),
@@ -399,6 +441,10 @@ impl Gateway {
             hot_config,
             cron_scheduler,
             skills_config,
+            deduplicator,
+            chunker,
+            formatter,
+            auto_route_attachments,
         }
     }
 
@@ -807,6 +853,10 @@ impl Gateway {
             let rate_limiter = self.rate_limiter.clone();
             let audit = self.audit.clone();
             let hot_config = self.hot_config.clone();
+            let deduplicator = self.deduplicator.clone();
+            let chunker = self.chunker.clone();
+            let formatter = self.formatter.clone();
+            let auto_route_attachments = self.auto_route_attachments;
 
             let msg_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
@@ -826,6 +876,10 @@ impl Gateway {
                         Some(rate_limiter.clone()),
                         audit.clone(),
                         Some(hot_config.clone()),
+                        deduplicator.clone(),
+                        chunker.clone(),
+                        formatter.clone(),
+                        auto_route_attachments,
                     )
                     .instrument(span)
                     .await
@@ -888,6 +942,10 @@ impl Gateway {
             Some(self.rate_limiter.clone()),
             self.audit.clone(),
             Some(self.hot_config.clone()),
+            self.deduplicator.clone(),
+            self.chunker.clone(),
+            self.formatter.clone(),
+            self.auto_route_attachments,
         )
         .instrument(span)
         .await
@@ -914,8 +972,8 @@ impl Gateway {
 
 /// Public entry point for integration tests — delegates to `handle_message_inner`.
 ///
-/// The new rate-limiter and audit parameters default to disabled/absent so that
-/// existing test call-sites do not need to change.
+/// Pipeline extras (rate-limiter, audit, dedup, chunker, formatter) default to
+/// disabled/absent so that existing test call-sites do not need to change.
 pub async fn handle_message_for_test(
     memory: &Arc<dyn MemoryStore>,
     agent_manager: &Arc<AgentManager>,
@@ -924,6 +982,7 @@ pub async fn handle_message_for_test(
     stats: &Arc<MessageStats>,
     message: Message,
 ) -> Result<()> {
+    let formatter = Arc::new(ResponseFormatter::new(false));
     handle_message_inner(
         memory,
         &None,
@@ -935,11 +994,16 @@ pub async fn handle_message_for_test(
         None,
         None,
         None,
+        None,
+        None,
+        formatter,
+        false,
     )
     .await
 }
 
 /// Core message-handling logic shared between the internal loop and public method.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message_inner(
     memory: &Arc<dyn MemoryStore>,
     summarizer: &Option<Arc<MemorySummarizer>>,
@@ -947,15 +1011,30 @@ async fn handle_message_inner(
     channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
     user_prefs: &Arc<UserPreferences>,
     stats: &Arc<MessageStats>,
-    message: Message,
+    mut message: Message,
     rate_limiter: Option<Arc<RateLimiter>>,
     audit: Option<Arc<AuditLogger>>,
     hot_config: Option<Arc<RwLock<HotConfig>>>,
+    deduplicator: Option<Arc<Mutex<MessageDeduplicator>>>,
+    chunker: Option<Arc<MessageChunker>>,
+    formatter: Arc<ResponseFormatter>,
+    auto_route_attachments: bool,
 ) -> Result<()> {
     info!(
         "Handling message from {} in channel {}",
         message.username, message.channel_id
     );
+
+    // ── Deduplication ─────────────────────────────────────────────────────────
+    if let Some(ref dedup) = deduplicator {
+        if dedup.lock().await.seen(&message.user_id, &message.content) {
+            tracing::debug!(
+                "Duplicate message from '{}', dropping",
+                message.user_id
+            );
+            return Ok(());
+        }
+    }
 
     // ── Audit: message received ───────────────────────────────────────────────
     if let Some(ref al) = audit {
@@ -1009,6 +1088,28 @@ async fn handle_message_inner(
         message.channel_id.clone()
     };
 
+    // ── Attachment auto-routing ───────────────────────────────────────────────
+    if auto_route_attachments && !message.attachments.is_empty() {
+        let mut prefix = String::new();
+        for attachment in &message.attachments {
+            match attachment.media_type.as_str() {
+                "pdf" => {
+                    prefix.push_str(&format!("Please analyze this PDF: {}\n\n", attachment.url));
+                }
+                "image" => {
+                    prefix.push_str(&format!(
+                        "Please describe this image: {}\n\n",
+                        attachment.url
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if !prefix.is_empty() {
+            message.content = format!("{}{}", prefix, message.content);
+        }
+    }
+
     // Track in memory store + stats
     memory.add_message(&message.user_id, format!("User: {}", message.content));
 
@@ -1043,19 +1144,28 @@ async fn handle_message_inner(
 
     memory.add_message(&message.user_id, format!("Assistant: {}", response_content));
 
-    // Send response to the resolved channel
-    let response = Message::new(
-        response_channel_id.clone(),
-        "assistant".to_string(),
-        "RustyNail".to_string(),
-        response_content,
-    );
+    // ── Format response for platform ─────────────────────────────────────────
+    let formatted = formatter.format(&response_content, &message.channel_id);
+
+    // ── Chunk and send ────────────────────────────────────────────────────────
+    let chunks = match &chunker {
+        Some(c) => c.chunk(&message.channel_id, &formatted),
+        None => vec![formatted],
+    };
 
     let channels = channels.read().await;
     for channel in channels.iter() {
         if channel.id() == response_channel_id {
-            channel.send_message(response.clone()).await?;
-            stats.record_outbound_async(&response).await;
+            for chunk in &chunks {
+                let response = Message::new(
+                    response_channel_id.clone(),
+                    "assistant".to_string(),
+                    "RustyNail".to_string(),
+                    chunk.clone(),
+                );
+                channel.send_message(response.clone()).await?;
+                stats.record_outbound_async(&response).await;
+            }
             return Ok(());
         }
     }

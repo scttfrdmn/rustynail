@@ -1,3 +1,4 @@
+pub mod fallback;
 pub mod manager;
 pub mod stub;
 

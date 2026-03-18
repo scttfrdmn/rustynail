@@ -2,6 +2,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Attachment represents a file or media item attached to a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// URL to the attachment (remote) or file path (local).
+    pub url: String,
+
+    /// Media type: `"pdf"`, `"image"`, or `"unknown"`.
+    pub media_type: String,
+
+    /// Optional filename hint.
+    pub filename: Option<String>,
+}
+
 /// Message represents a message flowing through the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -23,9 +36,9 @@ pub struct Message {
     /// Message timestamp
     pub timestamp: DateTime<Utc>,
 
-    /// Optional attachments (URLs)
+    /// Optional attachments
     #[serde(default)]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<Attachment>,
 
     /// Optional thread/conversation ID
     pub thread_id: Option<String>,
@@ -60,7 +73,7 @@ impl Message {
         }
     }
 
-    pub fn with_attachments(mut self, attachments: Vec<String>) -> Self {
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
         self.attachments = attachments;
         self
     }

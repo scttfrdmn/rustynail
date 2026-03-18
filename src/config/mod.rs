@@ -60,6 +60,27 @@ pub struct GatewayConfig {
     /// Graceful shutdown timeout in seconds (default 30). Env: `GATEWAY_SHUTDOWN_TIMEOUT_SECONDS`.
     #[serde(default = "default_shutdown_timeout_seconds")]
     pub shutdown_timeout_seconds: u64,
+
+    /// Enable long-message chunking for platform character limits (env: `GATEWAY_CHUNKING_ENABLED`).
+    #[serde(default)]
+    pub chunking_enabled: bool,
+
+    /// Per-platform max character limits for chunking (file-only; map can't be expressed as a single env var).
+    /// Keys are channel-id prefixes, e.g. `"discord"` → 2000.
+    #[serde(default)]
+    pub chunking_limits: std::collections::HashMap<String, usize>,
+
+    /// Enable platform-aware response formatting (env: `GATEWAY_FORMATTING_ENABLED`; default true).
+    #[serde(default = "default_true")]
+    pub formatting_enabled: bool,
+
+    /// Automatically prepend attachment context to the agent prompt (env: `GATEWAY_AUTO_ROUTE_ATTACHMENTS`).
+    #[serde(default)]
+    pub auto_route_attachments: bool,
+
+    /// Message deduplication settings.
+    #[serde(default)]
+    pub deduplication: DeduplicationConfig,
 }
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
@@ -614,6 +635,10 @@ pub struct AgentRetryConfig {
     /// Base delay in ms for the first retry (env: `AGENTS_RETRY_BASE_DELAY_MS`).
     #[serde(default = "default_retry_base_delay_ms")]
     pub base_delay_ms: u64,
+
+    /// Apply ±20% jitter to backoff delays (env: `AGENT_RETRY_JITTER_ENABLED`).
+    #[serde(default)]
+    pub jitter_enabled: bool,
 }
 
 impl Default for AgentRetryConfig {
@@ -622,6 +647,52 @@ impl Default for AgentRetryConfig {
             enabled: true,
             max_attempts: default_retry_max_attempts(),
             base_delay_ms: default_retry_base_delay_ms(),
+            jitter_enabled: false,
+        }
+    }
+}
+
+// ── Fallback LLM providers ────────────────────────────────────────────────────
+
+/// Configuration for a single fallback LLM provider.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FallbackProviderConfig {
+    /// Provider name, e.g. `"openai"`, `"ollama"`.
+    pub provider: String,
+
+    /// Model to use on this provider.
+    pub model: String,
+
+    /// API key for this provider.
+    pub api_key: String,
+
+    /// Optional API base URL override.
+    #[serde(default)]
+    pub api_base: Option<String>,
+}
+
+// ── Message deduplication ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeduplicationConfig {
+    /// Enable message deduplication (env: `GATEWAY_DEDUP_ENABLED`).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ring buffer capacity for seen-message hashes (env: `GATEWAY_DEDUP_WINDOW_SIZE`).
+    #[serde(default = "default_dedup_window")]
+    pub window_size: usize,
+}
+
+fn default_dedup_window() -> usize {
+    256
+}
+
+impl Default for DeduplicationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_size: default_dedup_window(),
         }
     }
 }
@@ -659,6 +730,11 @@ pub struct AgentsConfig {
     /// LLM retry configuration.
     #[serde(default)]
     pub retry: AgentRetryConfig,
+
+    /// Ordered list of fallback providers. Tried in sequence when the primary LLM
+    /// returns a capacity/overload error. File-only (no env-var equivalent).
+    #[serde(default)]
+    pub fallback_providers: Vec<FallbackProviderConfig>,
 }
 
 // ── Default value functions ───────────────────────────────────────────────────
@@ -800,6 +876,7 @@ impl Default for AgentsConfig {
             api_base: None,
             aws_region: None,
             retry: AgentRetryConfig::default(),
+            fallback_providers: Vec::new(),
         }
     }
 }
@@ -1001,6 +1078,29 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_shutdown_timeout_seconds),
+                chunking_enabled: std::env::var("GATEWAY_CHUNKING_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                chunking_limits: std::collections::HashMap::new(),
+                formatting_enabled: std::env::var("GATEWAY_FORMATTING_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(true),
+                auto_route_attachments: std::env::var("GATEWAY_AUTO_ROUTE_ATTACHMENTS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                deduplication: DeduplicationConfig {
+                    enabled: std::env::var("GATEWAY_DEDUP_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
+                    window_size: std::env::var("GATEWAY_DEDUP_WINDOW_SIZE")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(default_dedup_window),
+                },
             },
             channels: ChannelsConfig {
                 discord,
@@ -1047,7 +1147,12 @@ impl Config {
                         .ok()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or_else(default_retry_base_delay_ms),
+                    jitter_enabled: std::env::var("AGENT_RETRY_JITTER_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
                 },
+                fallback_providers: Vec::new(),
             },
             tools: ToolsConfig {
                 enabled: std::env::var("TOOLS_ENABLED")
