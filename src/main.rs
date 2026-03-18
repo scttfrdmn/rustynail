@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use rustynail::channels::discord::DiscordChannel;
 use rustynail::config::Config;
 use rustynail::gateway::Gateway;
@@ -6,8 +7,70 @@ use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+// ── CLI definition ────────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    name = "rustynail",
+    about = "RustyNail — high-performance personal AI assistant",
+    version = env!("CARGO_PKG_VERSION")
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the RustyNail gateway (default when no subcommand is given)
+    Start,
+
+    /// Show the status of a running RustyNail instance
+    Status {
+        /// HTTP port the running instance is listening on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
+
+    /// Print version and build information
+    Version,
+
+    /// Configuration subcommands
+    Config(ConfigArgs),
+}
+
+#[derive(clap::Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommands,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Validate configuration and print a summary (does not start the server)
+    Check,
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or(Commands::Start) {
+        Commands::Start => cmd_start().await,
+        Commands::Status { port } => cmd_status(port).await,
+        Commands::Version => cmd_version(),
+        Commands::Config(args) => match args.command {
+            ConfigCommands::Check => cmd_config_check(),
+        },
+    }
+}
+
+// ── Subcommand implementations ────────────────────────────────────────────────
+
+/// `rustynail start` — current default behavior.
+async fn cmd_start() -> Result<()> {
     // Load configuration first (needed to decide whether to enable OTel)
     let config = Config::load()?;
 
@@ -20,7 +83,6 @@ async fn main() -> Result<()> {
     if let Some(ref endpoint) = config.otel.endpoint {
         use opentelemetry_otlp::WithExportConfig;
 
-        // install_batch returns sdk::trace::Tracer which implements PreSampledTracer
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(
@@ -87,5 +149,93 @@ async fn main() -> Result<()> {
     }
 
     info!("RustyNail shutdown complete");
+    Ok(())
+}
+
+/// `rustynail status` — HTTP GET to running instance.
+async fn cmd_status(port: u16) -> Result<()> {
+    let url = format!("http://localhost:{}/status", port);
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Could not connect to RustyNail on port {}: {}", port, e))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Status request failed: HTTP {}",
+            resp.status()
+        ));
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+/// `rustynail version` — print version and build info.
+fn cmd_version() -> Result<()> {
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    println!("repository: {}", env!("CARGO_PKG_REPOSITORY"));
+    println!("license:    {}", env!("CARGO_PKG_LICENSE"));
+    Ok(())
+}
+
+/// `rustynail config check` — load and validate config, then exit.
+fn cmd_config_check() -> Result<()> {
+    // Initialize minimal tracing so config errors are readable
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("rustynail=info")
+        .try_init();
+
+    let config = Config::load()?;
+
+    println!("Configuration OK");
+    println!("  HTTP port:        {}", config.gateway.http_port);
+    println!("  WebSocket port:   {}", config.gateway.websocket_port);
+    println!("  Log level:        {}", config.gateway.log_level);
+    println!("  LLM model:        {}", config.agents.llm_model);
+    println!("  Memory backend:   {}", config.memory.backend);
+    println!("  Tools enabled:    {}", config.tools.enabled);
+    println!(
+        "  OTel endpoint:    {}",
+        config.otel.endpoint.as_deref().unwrap_or("(disabled)")
+    );
+    println!(
+        "  Dashboard auth:   {}",
+        if config.dashboard.auth_password.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+
+    let mut channels = Vec::new();
+    if config.channels.discord.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("discord");
+    }
+    if config.channels.whatsapp.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("whatsapp");
+    }
+    if config.channels.telegram.as_ref().is_some_and(|c| c.enabled) {
+        let mode = config
+            .channels
+            .telegram
+            .as_ref()
+            .map(|c| c.mode.as_str())
+            .unwrap_or("webhook");
+        if mode == "longpoll" {
+            channels.push("telegram (long-poll)");
+        } else {
+            channels.push("telegram (webhook)");
+        }
+    }
+    if config.channels.slack.as_ref().is_some_and(|c| c.enabled) {
+        channels.push("slack");
+    }
+    if channels.is_empty() {
+        println!("  Channels:         (none configured)");
+    } else {
+        println!("  Channels:         {}", channels.join(", "));
+    }
+
     Ok(())
 }

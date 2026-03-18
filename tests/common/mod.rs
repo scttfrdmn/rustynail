@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, ChannelsConfig, Config, GatewayConfig};
+use rustynail::config::{AgentsConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
 use rustynail::gateway::user_prefs::UserPreferences;
@@ -32,6 +32,7 @@ pub fn make_test_config() -> Config {
         tools: Default::default(),
         otel: Default::default(),
         dashboard: Default::default(),
+        memory: MemoryConfig::default(),
     }
 }
 

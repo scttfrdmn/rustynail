@@ -74,13 +74,29 @@ async fn metrics_returns_200() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // Response should be Prometheus text format
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        content_type.contains("text/plain"),
+        "expected text/plain content-type, got: {}",
+        content_type
+    );
+
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(json["active_users"].is_number());
-    assert!(json["channels_count"].is_number());
-    assert!(json["healthy_channels"].is_number());
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        body.contains("rustynail_messages_in_total"),
+        "expected Prometheus metric in body, got:\n{}",
+        &body[..body.len().min(500)]
+    );
 }
 
 #[tokio::test]

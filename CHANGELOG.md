@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-18
+
+### Added
+- Real Prometheus `/metrics` endpoint replacing the hand-rolled JSON response; exposes `rustynail_messages_in_total`, `rustynail_messages_out_total`, `rustynail_active_users`, `rustynail_healthy_channels`, and `rustynail_message_duration_seconds` (histogram with default buckets); content-type `text/plain; version=0.0.4`
+- Redis memory store (`RedisStore`) implementing `MemoryStore` via `redis` blocking client; configured via `REDIS_URL` + `REDIS_TTL_SECONDS` env vars or `memory.redis_url` + `memory.redis_ttl_seconds` YAML keys; graceful fallback to in-memory on connection failure
+- `MemoryConfig` section in config (`memory.backend`, `memory.redis_url`, `memory.redis_ttl_seconds`); `MEMORY_BACKEND=redis` switches backends at runtime
+- Telegram long-poll mode (`TELEGRAM_MODE=longpoll` or `channels.telegram.mode: longpoll`); `TelegramLongPollChannel` spawns a `getUpdates?timeout=30` loop with automatic offset tracking and 5-second backoff on error
+- Calendar tool (`CalendarTool`): `create`, `list`, `get`, `delete`, `upcoming` operations backed by a local JSON file in `RUSTYNAIL_DATA_DIR` (default `~/.rustynail/calendar.json`)
+- Message formatter tool (`FormatterTool`): pure-Rust `to_markdown`, `to_plain`, `truncate`, `wrap`, `summarize_header` operations; useful for adapting content across Discord/WhatsApp/Slack formatting conventions
+- Dashboard live WebSocket at `GET /dashboard/ws`; streams `stats_update` (every 5 s) and `message_event` (on each inbound/outbound message) JSON payloads; dashboard HTML updated with auto-reconnecting WebSocket JS block
+- CLI subcommands via `clap` derive macros: `rustynail start` (default), `rustynail status [--port N]`, `rustynail version`, `rustynail config check`
+- Message processing duration fed into the `rustynail_message_duration_seconds` Prometheus histogram in `handle_message_inner`
+
+### Changed
+- `Dockerfile` runtime stage switched from `debian:bookworm-slim` to `gcr.io/distroless/cc-debian12` (no shell, no package manager); CA certificates copied explicitly from builder stage; image now runs as distroless `nonroot` user (uid 65532)
+- `axum` dependency updated to enable the `ws` feature for WebSocket support
+- `MessageStats` extended with Prometheus metric handles and a `broadcast::Sender<DashboardEvent>`; `record_inbound_async` and `record_outbound_async` now also increment Prometheus counters and broadcast `MessageEvent`
+
 ## [0.4.5] - 2026-03-18
 
 ### Added
@@ -93,7 +111,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/scttfrdmn/rustynail/compare/v0.4.5...v0.5.0
+[0.4.5]: https://github.com/scttfrdmn/rustynail/compare/v0.4.1...v0.4.5
 [0.4.1]: https://github.com/scttfrdmn/rustynail/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/scttfrdmn/rustynail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scttfrdmn/rustynail/compare/v0.2.0...v0.3.0

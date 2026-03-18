@@ -12,6 +12,8 @@ pub struct Config {
     pub otel: OtelConfig,
     #[serde(default)]
     pub dashboard: DashboardConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,34 @@ pub struct TelegramConfig {
 
     #[serde(default)]
     pub webhook_secret: String,
+
+    /// Receive mode: `"webhook"` (default) or `"longpoll"`.
+    #[serde(default = "default_telegram_mode")]
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Storage backend: `"inmemory"` (default) or `"redis"`.
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+
+    /// Redis connection URL. Required when `backend = "redis"`.
+    pub redis_url: Option<String>,
+
+    /// TTL in seconds for Redis history keys. 0 = no expiry.
+    #[serde(default = "default_redis_ttl")]
+    pub redis_ttl_seconds: u64,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_memory_backend(),
+            redis_url: None,
+            redis_ttl_seconds: default_redis_ttl(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +235,18 @@ fn default_planning_max_steps() -> usize {
     10
 }
 
+fn default_memory_backend() -> String {
+    "inmemory".to_string()
+}
+
+fn default_redis_ttl() -> u64 {
+    86400
+}
+
+fn default_telegram_mode() -> String {
+    "webhook".to_string()
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -272,6 +314,7 @@ impl Config {
                 enabled: true,
                 bot_token,
                 webhook_secret,
+                mode: std::env::var("TELEGRAM_MODE").unwrap_or_else(|_| default_telegram_mode()),
             })
         } else {
             None
@@ -343,6 +386,15 @@ impl Config {
             },
             dashboard: DashboardConfig {
                 auth_password: std::env::var("DASHBOARD_AUTH_PASSWORD").ok(),
+            },
+            memory: MemoryConfig {
+                backend: std::env::var("MEMORY_BACKEND")
+                    .unwrap_or_else(|_| default_memory_backend()),
+                redis_url: std::env::var("REDIS_URL").ok(),
+                redis_ttl_seconds: std::env::var("REDIS_TTL_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_redis_ttl),
             },
         })
     }

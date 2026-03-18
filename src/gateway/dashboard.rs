@@ -5,15 +5,39 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use chrono::{DateTime, Utc};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, Opts, Registry};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tracing::warn;
 
 use crate::gateway::http::{AppState, ChannelStatus};
+
+// ── Dashboard events ──────────────────────────────────────────────────────────
+
+/// Events streamed over the `/dashboard/ws` WebSocket.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DashboardEvent {
+    /// Emitted every 5 seconds with current system counters.
+    StatsUpdate {
+        messages_in: u64,
+        messages_out: u64,
+        active_users: usize,
+        healthy_channels: usize,
+        uptime_seconds: u64,
+    },
+    /// Emitted on each inbound or outbound message.
+    MessageEvent {
+        channel: String,
+        user: String,
+        preview: String,
+        direction: String,
+    },
+}
 
 // ── Data structures ───────────────────────────────────────────────────────────
 
@@ -29,24 +53,95 @@ pub struct RecentMessage {
 
 /// Shared message statistics threaded through the gateway.
 ///
-/// Counters are atomics (lock-free reads). The recent-message ring buffer is
-/// guarded by a `RwLock` and capped at 50 entries.
+/// Atomic counters provide lock-free reads. The recent-message ring buffer is
+/// guarded by a `RwLock` and capped at 50 entries. Prometheus metrics are
+/// registered in an internal `Registry` and updated on every increment.
 pub struct MessageStats {
     messages_in: AtomicU64,
     messages_out: AtomicU64,
     start_instant: Instant,
     start_time: DateTime<Utc>,
     recent: RwLock<VecDeque<RecentMessage>>,
+    // Prometheus registry and metric handles
+    prom_registry: Registry,
+    prom_messages_in: Counter,
+    prom_messages_out: Counter,
+    prom_active_users: Gauge,
+    prom_healthy_channels: Gauge,
+    prom_message_duration: Histogram,
+    // Dashboard WebSocket broadcast
+    event_tx: broadcast::Sender<DashboardEvent>,
 }
 
 impl MessageStats {
     pub fn new() -> Arc<Self> {
+        let registry = Registry::new();
+
+        let prom_messages_in = Counter::with_opts(Opts::new(
+            "rustynail_messages_in_total",
+            "Total inbound messages since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_messages_out = Counter::with_opts(Opts::new(
+            "rustynail_messages_out_total",
+            "Total outbound messages since startup",
+        ))
+        .expect("counter creation failed");
+
+        let prom_active_users = Gauge::with_opts(Opts::new(
+            "rustynail_active_users",
+            "Current active user sessions",
+        ))
+        .expect("gauge creation failed");
+
+        let prom_healthy_channels = Gauge::with_opts(Opts::new(
+            "rustynail_healthy_channels",
+            "Number of healthy channel adapters",
+        ))
+        .expect("gauge creation failed");
+
+        let prom_message_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "rustynail_message_duration_seconds",
+                "Message processing latency in seconds",
+            )
+            .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
+        )
+        .expect("histogram creation failed");
+
+        registry
+            .register(Box::new(prom_messages_in.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_messages_out.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_active_users.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_healthy_channels.clone()))
+            .expect("register failed");
+        registry
+            .register(Box::new(prom_message_duration.clone()))
+            .expect("register failed");
+
+        // Channel capacity of 256; lagged receivers will skip events gracefully.
+        let (event_tx, _) = broadcast::channel(256);
+
         Arc::new(Self {
             messages_in: AtomicU64::new(0),
             messages_out: AtomicU64::new(0),
             start_instant: Instant::now(),
             start_time: Utc::now(),
             recent: RwLock::new(VecDeque::new()),
+            prom_registry: registry,
+            prom_messages_in,
+            prom_messages_out,
+            prom_active_users,
+            prom_healthy_channels,
+            prom_message_duration,
+            event_tx,
         })
     }
 
@@ -65,8 +160,40 @@ impl MessageStats {
         self.start_time
     }
 
+    /// Seconds elapsed since the gateway started (monotonic).
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start_instant.elapsed().as_secs()
+    }
+
+    /// Subscribe to dashboard events for the WebSocket handler.
+    pub fn subscribe(&self) -> broadcast::Receiver<DashboardEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Observe a message processing duration (feeds the histogram).
+    pub fn observe_message_duration(&self, duration_secs: f64) {
+        self.prom_message_duration.observe(duration_secs);
+    }
+
+    /// Update the active-users gauge (called from the metrics handler).
+    pub fn set_active_users(&self, n: usize) {
+        self.prom_active_users.set(n as f64);
+    }
+
+    /// Update the healthy-channels gauge (called from the metrics handler).
+    pub fn set_healthy_channels(&self, n: usize) {
+        self.prom_healthy_channels.set(n as f64);
+    }
+
+    /// Gather all metric families for Prometheus encoding.
+    pub fn prometheus_gather(&self) -> Vec<prometheus::proto::MetricFamily> {
+        self.prom_registry.gather()
+    }
+
     pub async fn record_inbound_async(&self, message: &Message) {
         self.messages_in.fetch_add(1, Ordering::Relaxed);
+        self.prom_messages_in.inc();
+
         let entry = RecentMessage {
             timestamp: Utc::now(),
             channel_id: message.channel_id.clone(),
@@ -74,6 +201,13 @@ impl MessageStats {
             content_preview: message.content.chars().take(120).collect(),
             direction: "inbound".to_string(),
         };
+        let _ = self.event_tx.send(DashboardEvent::MessageEvent {
+            channel: entry.channel_id.clone(),
+            user: entry.user_id.clone(),
+            preview: entry.content_preview.clone(),
+            direction: "inbound".to_string(),
+        });
+
         let mut recent = self.recent.write().await;
         recent.push_front(entry);
         if recent.len() > 50 {
@@ -83,6 +217,8 @@ impl MessageStats {
 
     pub async fn record_outbound_async(&self, message: &Message) {
         self.messages_out.fetch_add(1, Ordering::Relaxed);
+        self.prom_messages_out.inc();
+
         let entry = RecentMessage {
             timestamp: Utc::now(),
             channel_id: message.channel_id.clone(),
@@ -90,6 +226,13 @@ impl MessageStats {
             content_preview: message.content.chars().take(120).collect(),
             direction: "outbound".to_string(),
         };
+        let _ = self.event_tx.send(DashboardEvent::MessageEvent {
+            channel: entry.channel_id.clone(),
+            user: entry.user_id.clone(),
+            preview: entry.content_preview.clone(),
+            direction: "outbound".to_string(),
+        });
+
         let mut recent = self.recent.write().await;
         recent.push_front(entry);
         if recent.len() > 50 {
@@ -99,11 +242,6 @@ impl MessageStats {
 
     pub async fn recent_messages(&self) -> Vec<RecentMessage> {
         self.recent.read().await.iter().cloned().collect()
-    }
-
-    /// Seconds elapsed since the gateway started (monotonic).
-    pub fn uptime_seconds(&self) -> u64 {
-        self.start_instant.elapsed().as_secs()
     }
 }
 

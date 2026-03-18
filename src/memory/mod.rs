@@ -1,3 +1,6 @@
+pub mod redis;
+pub use redis::RedisStore;
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

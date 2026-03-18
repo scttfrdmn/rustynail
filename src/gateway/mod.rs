@@ -6,7 +6,7 @@ use crate::agents::AgentManager;
 use crate::channels::Channel;
 use crate::config::Config;
 use crate::gateway::dashboard::MessageStats;
-use crate::memory::{InMemoryStore, MemoryStore};
+use crate::memory::{InMemoryStore, MemoryStore, RedisStore};
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
 use anyhow::Result;
@@ -37,7 +37,37 @@ impl Gateway {
     pub fn new(config: Config) -> Self {
         let (event_tx, event_rx) = broadcast::channel(100);
         let (message_tx, message_rx) = mpsc::unbounded_channel();
-        let memory = Arc::new(InMemoryStore::new(config.agents.max_history));
+
+        // Select memory backend based on config
+        let memory: Arc<dyn MemoryStore> = if config.memory.backend == "redis" {
+            match &config.memory.redis_url {
+                Some(url) => {
+                    match RedisStore::new(
+                        url,
+                        config.agents.max_history,
+                        config.memory.redis_ttl_seconds,
+                    ) {
+                        Ok(store) => {
+                            info!("Using Redis memory store (url={})", url);
+                            Arc::new(store)
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to create Redis store, falling back to in-memory: {}",
+                                e
+                            );
+                            Arc::new(InMemoryStore::new(config.agents.max_history))
+                        }
+                    }
+                }
+                None => {
+                    error!("memory.backend=redis but REDIS_URL not set; falling back to in-memory");
+                    Arc::new(InMemoryStore::new(config.agents.max_history))
+                }
+            }
+        } else {
+            Arc::new(InMemoryStore::new(config.agents.max_history))
+        };
 
         // Build tool registry from config
         let mut tool_registry = ToolRegistry::new();
@@ -64,6 +94,18 @@ impl Gateway {
                 if let Err(e) = tool_registry.register(Arc::new(ws_tool)) {
                     error!("Failed to register web search tool: {}", e);
                 }
+            }
+
+            // Register calendar tool
+            let cal_tool = crate::tools::calendar::CalendarTool::with_default_dir();
+            if let Err(e) = tool_registry.register(Arc::new(cal_tool)) {
+                error!("Failed to register calendar tool: {}", e);
+            }
+
+            // Register formatter tool
+            let fmt_tool = crate::tools::formatter::FormatterTool;
+            if let Err(e) = tool_registry.register(Arc::new(fmt_tool)) {
+                error!("Failed to register formatter tool: {}", e);
             }
         }
 
@@ -126,14 +168,24 @@ impl Gateway {
             }
         }
 
-        // Add Telegram channel if enabled
+        // Add Telegram channel if enabled — choose webhook or long-poll mode
         if let Some(tg_config) = self.config.channels.telegram.clone().filter(|c| c.enabled) {
-            info!("Setting up Telegram channel");
-            let tg = crate::channels::telegram::TelegramChannel::new(
-                "telegram-main".to_string(),
-                tg_config,
-            );
-            self.register_channel(Box::new(tg)).await;
+            if tg_config.mode == "longpoll" {
+                info!("Setting up Telegram channel (long-poll mode)");
+                let tg = crate::channels::telegram_longpoll::TelegramLongPollChannel::new(
+                    "telegram-main".to_string(),
+                    tg_config,
+                    self.message_tx.clone(),
+                );
+                self.register_channel(Box::new(tg)).await;
+            } else {
+                info!("Setting up Telegram channel (webhook mode)");
+                let tg = crate::channels::telegram::TelegramChannel::new(
+                    "telegram-main".to_string(),
+                    tg_config,
+                );
+                self.register_channel(Box::new(tg)).await;
+            }
         }
 
         // Add Slack channel if enabled
@@ -360,11 +412,13 @@ async fn handle_message_inner(
     memory.add_message(&message.user_id, format!("User: {}", message.content));
     stats.record_inbound_async(&message).await;
 
-    // Process with agent
+    // Process with agent (record duration for Prometheus histogram)
+    let processing_start = std::time::Instant::now();
     let response_content = agent_manager
         .process_message(&message.user_id, &message.content)
         .instrument(tracing::info_span!("agent.process", user_id = %message.user_id))
         .await?;
+    stats.observe_message_duration(processing_start.elapsed().as_secs_f64());
 
     memory.add_message(&message.user_id, format!("Assistant: {}", response_content));
 

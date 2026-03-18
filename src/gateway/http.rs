@@ -5,20 +5,24 @@ use crate::channels::slack::{
 use crate::channels::telegram::{parse_update, TelegramUpdate};
 use crate::channels::whatsapp::{parse_webhook, WebhookBody};
 use crate::channels::Channel;
-use crate::gateway::dashboard::MessageStats;
+use crate::gateway::dashboard::{DashboardEvent, MessageStats};
 use crate::gateway::user_prefs::UserPreferences;
 use crate::types::Message;
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{info, warn};
 
 /// All parameters needed to start the HTTP server in a single struct.
@@ -80,6 +84,7 @@ pub struct ChannelStatus {
     pub running: bool,
 }
 
+// MetricsResponse kept for unit-test backwards compat but not used by the handler.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetricsResponse {
     pub active_users: usize,
@@ -118,16 +123,35 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
-async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+async fn metrics_handler(State(state): State<AppState>) -> Response {
     let channels = state.channels.read().await;
     let active_users = state.agent_manager.active_users().await;
     let healthy_channels = channels.iter().filter(|c| c.health().is_healthy()).count();
 
-    Json(MetricsResponse {
-        active_users,
-        channels_count: channels.len(),
-        healthy_channels,
-    })
+    // Update dynamic Prometheus gauges before encoding
+    state.stats.set_active_users(active_users);
+    state.stats.set_healthy_channels(healthy_channels);
+
+    let encoder = prometheus::TextEncoder::new();
+    let metric_families = state.stats.prometheus_gather();
+    let mut buffer = Vec::new();
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("metrics encoding error: {}", e),
+        )
+            .into_response();
+    }
+    let body = String::from_utf8(buffer).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -350,6 +374,54 @@ async fn set_user_preferences(
     StatusCode::OK
 }
 
+// ── Dashboard WebSocket handler ───────────────────────────────────────────────
+
+async fn dashboard_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, state))
+}
+
+async fn handle_ws_socket(mut socket: WebSocket, state: AppState) {
+    let mut rx: broadcast::Receiver<DashboardEvent> = state.stats.subscribe();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let channels = state.channels.read().await;
+                let active_users = state.agent_manager.active_users().await;
+                let healthy = channels.iter().filter(|c| c.health().is_healthy()).count();
+
+                let event = DashboardEvent::StatsUpdate {
+                    messages_in: state.stats.messages_in(),
+                    messages_out: state.stats.messages_out(),
+                    active_users,
+                    healthy_channels: healthy,
+                    uptime_seconds: state.stats.uptime_seconds(),
+                };
+                let json = serde_json::to_string(&event).unwrap_or_default();
+                if socket.send(WsMessage::Text(json)).await.is_err() {
+                    break;
+                }
+            }
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if socket.send(WsMessage::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        }
+    }
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 pub fn create_router(state: AppState) -> Router {
@@ -379,6 +451,7 @@ pub fn create_router(state: AppState) -> Router {
             "/dashboard/data",
             get(crate::gateway::dashboard::dashboard_data_handler),
         )
+        .route("/dashboard/ws", get(dashboard_ws_handler))
         .with_state(state)
 }
 
@@ -409,6 +482,7 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
     info!("  Ready:      http://localhost:{}/ready", cfg.port);
     info!("  Live:       http://localhost:{}/live", cfg.port);
     info!("  Dashboard:  http://localhost:{}/dashboard", cfg.port);
+    info!("  Dash WS:    ws://localhost:{}/dashboard/ws", cfg.port);
 
     axum::serve(listener, app).await?;
     Ok(())

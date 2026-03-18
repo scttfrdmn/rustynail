@@ -1,6 +1,6 @@
 [package]
 name = "rustynail"
-version = "0.4.5"
+version = "0.5.0"
 edition = "2021"
 authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
 description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"
@@ -22,8 +22,8 @@ async-trait = "0.1"
 # Discord integration
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
 
-# HTTP server
-axum = "0.7"
+# HTTP server (ws feature for dashboard WebSocket)
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 
@@ -56,6 +56,15 @@ base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+
+# Real Prometheus metrics
+prometheus = "0.13"
+
+# Redis memory store (blocking client)
+redis = { version = "0.24", features = ["default"] }
+
+# CLI subcommands
+clap = { version = "4", features = ["derive"] }
 
 # OpenTelemetry (pin to agenkit's versions to avoid duplicate crates)
 opentelemetry = { version = "0.23", features = ["trace"] }

@@ -164,6 +164,78 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 30000);
+
+// ── Live WebSocket updates ────────────────────────────────────────────────────
+let ws = null;
+let wsConnected = false;
+
+function connectWs() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  try {
+    ws = new WebSocket(`${protocol}//${location.host}/dashboard/ws`);
+  } catch (e) {
+    console.warn('WebSocket not supported or blocked, using polling only');
+    return;
+  }
+
+  ws.onopen = function () {
+    wsConnected = true;
+    console.log('Dashboard WebSocket connected');
+  };
+
+  ws.onmessage = function (event) {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'stats_update') {
+        document.getElementById('stat-in').textContent = data.messages_in.toLocaleString();
+        document.getElementById('stat-out').textContent = data.messages_out.toLocaleString();
+        document.getElementById('stat-users').textContent = data.active_users.toLocaleString();
+        document.getElementById('stat-uptime').textContent = fmtUptime(data.uptime_seconds);
+        const uptimeMin = Math.max(1, data.uptime_seconds / 60);
+        const rate = (data.messages_in / uptimeMin).toFixed(2);
+        document.getElementById('stat-rate').textContent = rate;
+        document.getElementById('last-updated').textContent = 'Live ● ' + new Date().toLocaleTimeString();
+      } else if (data.type === 'message_event') {
+        prependMessageRow(data);
+      }
+    } catch (e) {
+      console.error('WS parse error:', e);
+    }
+  };
+
+  ws.onclose = function () {
+    wsConnected = false;
+    console.log('Dashboard WebSocket closed — reconnecting in 5s');
+    setTimeout(connectWs, 5000);
+  };
+
+  ws.onerror = function () {
+    // onerror is always followed by onclose; let onclose handle reconnect
+    wsConnected = false;
+  };
+}
+
+function prependMessageRow(data) {
+  const mb = document.getElementById('messages-body');
+  const emptyRow = mb.querySelector('.empty-row');
+  if (emptyRow) emptyRow.remove();
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${new Date().toLocaleTimeString()}</td>
+    <td><span class="badge badge-${data.direction}">${data.direction}</span></td>
+    <td>${data.channel}</td>
+    <td>${data.user}</td>
+    <td>${data.preview}</td>`;
+  mb.insertBefore(tr, mb.firstChild);
+
+  // Keep at most 50 rows
+  while (mb.rows.length > 50) {
+    mb.deleteRow(mb.rows.length - 1);
+  }
+}
+
+connectWs();
 </script>
 </body>
 </html>

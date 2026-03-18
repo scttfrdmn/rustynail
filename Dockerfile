@@ -21,28 +21,20 @@ COPY . .
 # Build only the rustynail binary in release mode
 RUN cargo build --release --manifest-path rustynail/Cargo.toml
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# ── Stage 2: Runtime (distroless) ─────────────────────────────────────────────
+# gcr.io/distroless/cc-debian12 provides glibc + libssl without a shell or
+# package manager, significantly reducing the attack surface.
+FROM gcr.io/distroless/cc-debian12 AS runtime
 
-# Install runtime dependencies: CA certificates + OpenSSL runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create a non-root user
-RUN useradd --system --no-create-home --uid 1001 rustynail
+# Copy CA certificates from the builder so outbound HTTPS calls work
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /build/rustynail/target/release/rustynail /app/rustynail
 
-# Set ownership
-RUN chown rustynail:rustynail /app/rustynail
-
-USER rustynail
-
 EXPOSE 8080
 
+# distroless images run as a non-root user (uid 65532 "nonroot") by default
 ENTRYPOINT ["/app/rustynail"]

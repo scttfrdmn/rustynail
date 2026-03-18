@@ -1,5 +1,7 @@
 pub mod calculator;
+pub mod calendar;
 pub mod filesystem;
+pub mod formatter;
 pub mod web_search;
 
 pub use agenkit::{Tool, ToolResult};
