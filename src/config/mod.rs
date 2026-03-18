@@ -6,6 +6,8 @@ pub struct Config {
     pub gateway: GatewayConfig,
     pub channels: ChannelsConfig,
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,7 @@ pub struct GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
+    pub whatsapp: Option<WhatsAppConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +39,42 @@ pub struct DiscordConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordAuthConfig {
     pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub phone_number_id: String,
+
+    #[serde(default)]
+    pub access_token: String,
+
+    #[serde(default)]
+    pub verify_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_max_steps")]
+    pub max_steps: usize,
+
+    pub filesystem_root: Option<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_steps: default_max_steps(),
+            filesystem_root: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +127,10 @@ fn default_temperature() -> f32 {
     0.7
 }
 
+fn default_max_steps() -> usize {
+    10
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -125,6 +168,21 @@ impl Config {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
 
+        let whatsapp = if let (Ok(phone_number_id), Ok(access_token), Ok(verify_token)) = (
+            std::env::var("WHATSAPP_PHONE_NUMBER_ID"),
+            std::env::var("WHATSAPP_ACCESS_TOKEN"),
+            std::env::var("WHATSAPP_VERIFY_TOKEN"),
+        ) {
+            Some(WhatsAppConfig {
+                enabled: true,
+                phone_number_id,
+                access_token,
+                verify_token,
+            })
+        } else {
+            None
+        };
+
         Ok(Config {
             gateway: GatewayConfig {
                 websocket_port: std::env::var("GATEWAY_WEBSOCKET_PORT")
@@ -144,6 +202,7 @@ impl Config {
                         token: discord_token,
                     },
                 }),
+                whatsapp,
             },
             agents: AgentsConfig {
                 llm_provider: default_llm_provider(),
@@ -151,6 +210,17 @@ impl Config {
                 api_key,
                 max_history: default_max_history(),
                 temperature: default_temperature(),
+            },
+            tools: ToolsConfig {
+                enabled: std::env::var("TOOLS_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                max_steps: std::env::var("TOOLS_MAX_STEPS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_max_steps),
+                filesystem_root: std::env::var("TOOLS_FILESYSTEM_ROOT").ok(),
             },
         })
     }

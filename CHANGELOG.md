@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tool registry system backed by agenkit `Tool` trait; agents upgraded to `ReActAgent` when tools are registered and `tools.enabled = true`
+- Calculator tool: add, sub, mul, div, pow, sqrt, abs, floor, ceil, round operations
+- FileSystem tool: read, write, list, exists — sandboxed to a configured root path (rejects path traversal)
+- WhatsApp Cloud API channel adapter: webhook receive (GET verify + POST events) and REST send via Graph API v18.0
+- Cross-channel message routing: per-user preferred response channel via `POST /users/:id/preferences`; query via `GET /users/:id/preferences`
+- Gateway now owns its internal message channel; `message_sender()` method for external channel adapters (Discord, etc.)
+- `ToolsConfig` and `WhatsAppConfig` added to the configuration system (env vars + YAML)
+
 ## [0.1.0] - 2026-02-01
 
 ### Added

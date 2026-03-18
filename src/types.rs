@@ -33,6 +33,10 @@ pub struct Message {
     /// Message metadata
     #[serde(default)]
     pub metadata: serde_json::Value,
+
+    /// Override the channel to send the response to (cross-channel routing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_channel_id: Option<String>,
 }
 
 impl Message {
@@ -52,6 +56,7 @@ impl Message {
             attachments: Vec::new(),
             thread_id: None,
             metadata: serde_json::Value::Null,
+            preferred_channel_id: None,
         }
     }
 
