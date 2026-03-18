@@ -14,6 +14,8 @@ pub struct Config {
     pub dashboard: DashboardConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +212,48 @@ pub struct SmtpConfig {
 
     #[serde(default)]
     pub from_address: String,
+}
+
+// ── MCP servers ───────────────────────────────────────────────────────────────
+
+/// Configuration for one MCP server connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    /// Human-readable name used in log messages.
+    pub name: String,
+
+    /// Transport type: `"stdio"` (default) or `"http"`.
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+
+    // ── stdio fields ──────────────────────────────────────────────────────────
+
+    /// Command to spawn (stdio transport only).
+    pub command: Option<String>,
+
+    /// Arguments for the subprocess.
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Extra environment variables for the subprocess (`[["KEY", "VALUE"], ...]`).
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+
+    // ── http fields ───────────────────────────────────────────────────────────
+
+    /// Base URL of the MCP HTTP server (http transport only).
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpConfig {
+    /// List of MCP servers to connect to at startup.
+    #[serde(default)]
+    pub servers: Vec<McpServerEntry>,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
 }
 
 // ── Memory ────────────────────────────────────────────────────────────────────
@@ -724,6 +768,7 @@ impl Config {
                         .unwrap_or_else(|_| default_summarization_model()),
                 },
             },
+            mcp: McpConfig::default(),
         })
     }
 }

@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, Instrument};
 
+use agenkit::protocols::{McpClient, McpHttpClient, McpStdioClient, mcp_tools_from_client};
 use agenkit::Tool;
 use user_prefs::UserPreferences;
 
@@ -329,6 +330,87 @@ impl Gateway {
                 self.message_tx.clone(),
             );
             self.register_channel(Box::new(em)).await;
+        }
+
+        // Connect MCP servers and register their tools
+        for server_cfg in &self.config.mcp.servers {
+            let tools = match server_cfg.transport.as_str() {
+                "http" => {
+                    let url = match &server_cfg.url {
+                        Some(u) => u.clone(),
+                        None => {
+                            error!(
+                                "MCP server '{}' has transport=http but no url configured",
+                                server_cfg.name
+                            );
+                            continue;
+                        }
+                    };
+                    let mut client = McpHttpClient::new(&url);
+                    match client.initialize().await {
+                        Ok(()) => {
+                            info!(
+                                "MCP server '{}' connected ({})",
+                                server_cfg.name,
+                                client.server_info().name
+                            );
+                            mcp_tools_from_client(std::sync::Arc::new(client))
+                                .await
+                                .unwrap_or_else(|e| {
+                                    error!("Failed to list tools from MCP server '{}': {}", server_cfg.name, e);
+                                    vec![]
+                                })
+                        }
+                        Err(e) => {
+                            error!("Failed to initialize MCP server '{}': {}", server_cfg.name, e);
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    // stdio (default)
+                    let command = match &server_cfg.command {
+                        Some(c) => c.clone(),
+                        None => {
+                            error!(
+                                "MCP server '{}' has transport=stdio but no command configured",
+                                server_cfg.name
+                            );
+                            continue;
+                        }
+                    };
+                    let arg_strs: Vec<&str> = server_cfg.args.iter().map(|s| s.as_str()).collect();
+                    let mut client = McpStdioClient::new(&command, &arg_strs);
+                    for (k, v) in &server_cfg.env {
+                        client = client.with_env(k, v);
+                    }
+                    match client.initialize().await {
+                        Ok(()) => {
+                            info!(
+                                "MCP server '{}' connected ({})",
+                                server_cfg.name,
+                                client.server_info().name
+                            );
+                            mcp_tools_from_client(std::sync::Arc::new(client))
+                                .await
+                                .unwrap_or_else(|e| {
+                                    error!("Failed to list tools from MCP server '{}': {}", server_cfg.name, e);
+                                    vec![]
+                                })
+                        }
+                        Err(e) => {
+                            error!("Failed to initialize MCP server '{}': {}", server_cfg.name, e);
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            for tool in tools {
+                if let Err(e) = self.register_tool(tool).await {
+                    error!("Failed to register MCP tool: {}", e);
+                }
+            }
         }
 
         // Pre-compute sender and config values for HTTP server

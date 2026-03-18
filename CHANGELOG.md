@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-03-18
+
+### Added
+- MCP (Model Context Protocol) support via agenkit 0.82.0
+- `rustynail mcp serve` subcommand: exposes RustyNail's registered tools (calculator, formatter, filesystem, web search, calendar) as an MCP server over stdio, compatible with Claude Code, Cursor, and any MCP client
+- MCP client connectivity in gateway `start()`: configure `mcp.servers` in YAML to connect to external MCP servers at startup and register their tools into the agent tool registry; supports both `stdio` (subprocess) and `http` transports; gracefully skips misconfigured or unreachable servers with an error log
+- `McpConfig` and `McpServerEntry` structs in config: `mcp.servers` list with `name`, `transport`, `command`, `args`, `env` (stdio), and `url` (http) fields
+
 ## [0.6.0] - 2026-03-18
 
 ### Added
@@ -139,7 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/scttfrdmn/rustynail/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/scttfrdmn/rustynail/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/scttfrdmn/rustynail/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/scttfrdmn/rustynail/compare/v0.4.1...v0.4.5

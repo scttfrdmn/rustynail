@@ -4,6 +4,7 @@ use clap_complete::Shell;
 use rustynail::channels::discord::DiscordChannel;
 use rustynail::config::Config;
 use rustynail::gateway::Gateway;
+use std::sync::Arc;
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -45,6 +46,24 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// MCP (Model Context Protocol) subcommands
+    Mcp(McpArgs),
+}
+
+#[derive(clap::Args)]
+struct McpArgs {
+    #[command(subcommand)]
+    command: McpCommands,
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Expose RustyNail's registered tools as an MCP server over stdio.
+    ///
+    /// Pipe this into Claude Code or any MCP-compatible client:
+    ///   rustynail mcp serve
+    Serve,
 }
 
 #[derive(clap::Args)]
@@ -73,6 +92,9 @@ async fn main() -> Result<()> {
             ConfigCommands::Check => cmd_config_check(),
         },
         Commands::Completions { shell } => cmd_completions(shell),
+        Commands::Mcp(args) => match args.command {
+            McpCommands::Serve => cmd_mcp_serve().await,
+        },
     }
 }
 
@@ -285,4 +307,50 @@ fn cmd_config_check() -> Result<()> {
 fn cmd_completions(shell: Shell) -> Result<()> {
     clap_complete::generate(shell, &mut Cli::command(), "rustynail", &mut std::io::stdout());
     Ok(())
+}
+
+/// `rustynail mcp serve` — expose RustyNail tools as an MCP server over stdio.
+async fn cmd_mcp_serve() -> Result<()> {
+    use agenkit::protocols::{McpServer, McpServerConfig};
+    use rustynail::tools::{calculator::CalculatorTool, formatter::FormatterTool};
+
+    // Log to stderr so stdio transport stays clean
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter("rustynail=warn")
+        .try_init();
+
+    let config = Config::load()?;
+
+    let mut tools: Vec<Arc<dyn agenkit::Tool>> = vec![
+        Arc::new(CalculatorTool),
+        Arc::new(FormatterTool),
+    ];
+
+    if config.tools.enabled {
+        if let Some(ref fs_root) = config.tools.filesystem_root {
+            tools.push(Arc::new(rustynail::tools::filesystem::FileSystemTool::new(
+                std::path::PathBuf::from(fs_root),
+            )));
+        }
+        if let Some(ref api_key) = config.tools.web_search_api_key {
+            tools.push(Arc::new(rustynail::tools::web_search::WebSearchTool::new(
+                api_key.clone(),
+            )));
+        }
+        tools.push(Arc::new(
+            rustynail::tools::calendar::CalendarTool::with_default_dir(),
+        ));
+    }
+
+    let server = McpServer::new(McpServerConfig {
+        name: "rustynail".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        tools,
+    });
+
+    server
+        .serve_stdio()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP serve error: {}", e))
 }

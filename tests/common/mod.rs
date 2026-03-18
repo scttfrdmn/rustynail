@@ -37,6 +37,7 @@ pub fn make_test_config() -> Config {
         otel: Default::default(),
         dashboard: Default::default(),
         memory: MemoryConfig::default(),
+        mcp: Default::default(),
     }
 }
 
