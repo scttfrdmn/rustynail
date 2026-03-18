@@ -200,6 +200,7 @@ Update this table at the start of each milestone planning session.
 | v0.10.0 | BuckTooth Remaining Gaps — PDF analysis, image analysis, Admin API, Cron scheduler, WS origin restriction, configurable shutdown timeout | Closed (released 2026-03-18) |
 | v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
+| v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview
 
