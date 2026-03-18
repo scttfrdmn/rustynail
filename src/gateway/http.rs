@@ -11,11 +11,13 @@ use crate::channels::webchat::{WebchatSessions, WIDGET_JS};
 use crate::channels::webhook::{parse_webhook_body, verify_webhook_signature};
 use crate::channels::whatsapp::{parse_webhook, WebhookBody};
 use crate::channels::Channel;
-use crate::config::WebhookEndpoint;
+use crate::config::{SkillsConfig, WebhookEndpoint};
+use crate::cron::CronJobStatus;
 use crate::gateway::dashboard::{DashboardEvent, MessageStats};
 use crate::gateway::HotConfig;
 use crate::gateway::rate_limiter::RateLimiter;
 use crate::gateway::user_prefs::UserPreferences;
+use crate::skills::SkillRegistry;
 use crate::types::Message;
 use axum::{
     body::Bytes,
@@ -28,7 +30,7 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     BoxError,
     Router,
 };
@@ -82,6 +84,12 @@ pub struct HttpServerConfig {
     pub audit: Option<Arc<AuditLogger>>,
     /// Hot-reloadable config (api_token, rate_limit, etc.).
     pub hot_config: Arc<RwLock<HotConfig>>,
+    /// Skills config for the admin /skills/reload endpoint.
+    pub skills_config: SkillsConfig,
+    /// Cron job status snapshot for GET /cron/jobs.
+    pub cron_jobs: Vec<CronJobStatus>,
+    /// Allowed WebSocket upgrade origins (empty = allow all).
+    pub allowed_ws_origins: Vec<String>,
 }
 
 /// Axum shared state cloned into every request handler.
@@ -110,6 +118,9 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub audit: Option<Arc<AuditLogger>>,
     pub hot_config: Arc<RwLock<HotConfig>>,
+    pub skills_config: SkillsConfig,
+    pub cron_jobs: Vec<CronJobStatus>,
+    pub allowed_ws_origins: Vec<String>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────
@@ -582,13 +593,24 @@ struct WebchatWsQuery {
 
 async fn webchat_ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<WebchatWsQuery>,
-) -> impl IntoResponse {
+) -> Response {
+    if !state.allowed_ws_origins.is_empty() {
+        let origin = headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !state.allowed_ws_origins.iter().any(|o| o == origin) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     let session_id = query
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     ws.on_upgrade(move |socket| handle_webchat_socket(socket, state, session_id))
+        .into_response()
 }
 
 async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_id: String) {
@@ -802,9 +824,20 @@ async fn set_user_preferences(
 
 async fn dashboard_ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if !state.allowed_ws_origins.is_empty() {
+        let origin = headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !state.allowed_ws_origins.iter().any(|o| o == origin) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     ws.on_upgrade(move |socket| handle_ws_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_ws_socket(mut socket: WebSocket, state: AppState) {
@@ -844,6 +877,69 @@ async fn handle_ws_socket(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+// ── Admin API handlers ────────────────────────────────────────────────────────
+
+async fn admin_clear_memory_handler(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> impl IntoResponse {
+    state.agent_manager.clear_history(&user_id, true).await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "user_id": user_id,
+        "cleared": true
+    }))
+}
+
+async fn admin_reload_skills_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut registry = SkillRegistry::new();
+    let n = registry.discover_skills(&state.skills_config.paths);
+    let ctx = registry.build_skill_context(state.skills_config.max_active);
+    state.agent_manager.reload_skills_context(ctx).await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "skills_loaded": n
+    }))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AdminChannelHealthEntry {
+    id: String,
+    name: String,
+    health: String,
+    running: bool,
+    health_detail: Option<String>,
+}
+
+async fn admin_channels_health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let channels = state.channels.read().await;
+    let entries: Vec<AdminChannelHealthEntry> = channels
+        .iter()
+        .map(|c| {
+            let health = c.health();
+            let health_detail = match &health {
+                crate::types::ChannelHealth::Degraded { reason } => Some(reason.clone()),
+                crate::types::ChannelHealth::Unhealthy { reason } => Some(reason.clone()),
+                _ => None,
+            };
+            AdminChannelHealthEntry {
+                id: c.id().to_string(),
+                name: c.name().to_string(),
+                health: format!("{:?}", health),
+                running: c.is_running(),
+                health_detail,
+            }
+        })
+        .collect();
+    Json(entries)
+}
+
+// ── Cron jobs handler ─────────────────────────────────────────────────────────
+
+async fn cron_jobs_handler(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.cron_jobs.clone())
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -895,6 +991,12 @@ pub fn create_router(state: AppState, max_body_bytes: usize, request_timeout_sec
         // Zero-credential test channel endpoints (only active when test_channel is set)
         .route("/test/send", post(test_send_handler))
         .route("/test/responses", get(test_responses_handler))
+        // Admin API endpoints (protected by bearer auth middleware)
+        .route("/admin/memory/:user_id", delete(admin_clear_memory_handler))
+        .route("/admin/skills/reload", post(admin_reload_skills_handler))
+        .route("/admin/channels/health", get(admin_channels_health_handler))
+        // Cron jobs status
+        .route("/cron/jobs", get(cron_jobs_handler))
         // Apply request body limit and handler timeout globally, then bearer auth.
         // TimeoutLayer requires HandleErrorLayer to convert BoxError → HTTP 408.
         .layer(middleware::from_fn_with_state(
@@ -942,6 +1044,9 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
         rate_limiter: cfg.rate_limiter,
         audit: cfg.audit,
         hot_config: cfg.hot_config,
+        skills_config: cfg.skills_config,
+        cron_jobs: cfg.cron_jobs,
+        allowed_ws_origins: cfg.allowed_ws_origins,
     };
 
     let app = create_router(state, max_body_bytes, request_timeout_seconds);
@@ -959,6 +1064,8 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
     info!("  Dash WS:    ws://localhost:{}/dashboard/ws", cfg.port);
     info!("  Webchat:    ws://localhost:{}/channels/webchat/ws", cfg.port);
     info!("  Widget JS:  http://localhost:{}/channels/webchat/widget.js", cfg.port);
+    info!("  Admin:      http://localhost:{}/admin/channels/health", cfg.port);
+    info!("  Cron jobs:  http://localhost:{}/cron/jobs", cfg.port);
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -974,7 +1081,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_state() -> AppState {
-        use crate::config::RateLimitConfig;
+        use crate::config::{RateLimitConfig, SkillsConfig};
         use crate::gateway::HotConfig;
 
         AppState {
@@ -1007,6 +1114,9 @@ mod tests {
                 audit_enabled: false,
                 audit_path: String::new(),
             })),
+            skills_config: SkillsConfig::default(),
+            cron_jobs: Vec::new(),
+            allowed_ws_origins: Vec::new(),
         }
     }
 

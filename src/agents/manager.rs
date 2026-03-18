@@ -1,6 +1,5 @@
-use crate::config::{AgentRetryConfig, AgentsConfig, SkillsConfig, ToolsConfig};
+use crate::config::{AgentRetryConfig, AgentsConfig, ToolsConfig};
 use crate::gateway::dashboard::MessageStats;
-use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 
 const SYSTEM_PROMPT: &str = "You are a helpful AI assistant named RustyNail. \
@@ -34,7 +33,8 @@ pub struct AgentManager {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     planning_agent: Option<Arc<PlanningAgent>>,
     /// Skills context appended to every new agent's system prompt (when skills are enabled).
-    skills_context: Option<String>,
+    /// Wrapped in Arc<RwLock<>> to support hot-reload via `reload_skills_context`.
+    skills_context: Arc<RwLock<Option<String>>>,
     /// Prometheus / dashboard stats (optional; absent in tests).
     stats: Option<Arc<MessageStats>>,
     /// LLM retry configuration.
@@ -114,7 +114,7 @@ impl AgentManager {
             agents: Arc::new(RwLock::new(HashMap::new())),
             tool_registry: Arc::new(RwLock::new(registry)),
             planning_agent,
-            skills_context,
+            skills_context: Arc::new(RwLock::new(skills_context)),
             stats,
             retry_config,
         }
@@ -124,6 +124,13 @@ impl AgentManager {
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
         let mut registry = self.tool_registry.write().await;
         registry.register(tool)
+    }
+
+    /// Replace the skills context used for all future agent creations.
+    /// Existing per-user agents are not affected until their next recreation.
+    pub async fn reload_skills_context(&self, ctx: Option<String>) {
+        let mut lock = self.skills_context.write().await;
+        *lock = ctx;
     }
 
     /// Create an LLM backend based on the configured `llm_provider`.
@@ -250,11 +257,12 @@ impl AgentManager {
         drop(registry);
 
         // Build system prompt, optionally appending skill context
-        let system_prompt = match &self.skills_context {
-            Some(ctx) if !ctx.is_empty() => {
-                format!("{}{}", SYSTEM_PROMPT, ctx)
+        let system_prompt = {
+            let ctx = self.skills_context.read().await;
+            match ctx.as_deref() {
+                Some(c) if !c.is_empty() => format!("{}{}", SYSTEM_PROMPT, c),
+                _ => SYSTEM_PROMPT.to_string(),
             }
-            _ => SYSTEM_PROMPT.to_string(),
         };
 
         ConversationalAgent::new(ConversationalConfig {

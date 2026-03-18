@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-03-18
+
+### Added
+- PDF analysis tool (`pdf_analysis`): fetches or reads a PDF, base64-encodes it, and posts it to the Anthropic API as a `document` content block with the `pdfs-2024-09-25` beta header; configured via `tools.pdf_enabled` (env: `TOOLS_PDF_ENABLED`; default false); supports path or URL source, custom prompt, configurable `max_bytes` (default 32 MB)
+- Image analysis tool (`image_analysis`): fetches or reads a jpeg/png/gif/webp image, detects media type from Content-Type header or file extension, base64-encodes it, and posts it to the Anthropic vision API; configured via `tools.image_enabled` (env: `TOOLS_IMAGE_ENABLED`; default false); supports path or URL source, custom prompt, configurable `max_bytes` (default 5 MB)
+- Admin API endpoints under `/admin/*` (protected by bearer auth middleware): `DELETE /admin/memory/:user_id` clears a user's conversation history; `POST /admin/skills/reload` hot-reloads skills from disk without restart and returns `{"skills_loaded": N}`; `GET /admin/channels/health` returns per-channel health status with `health_detail` string for degraded/unhealthy channels
+- Cron scheduler (`CronScheduler` in `src/cron/`): fires synthetic messages on configurable intervals (suffix: `s`, `m`, `h`, `d`); configured via `cron.jobs` YAML list (name, schedule, message, channel_id, user_id, enabled); invalid schedule strings log a warning and are skipped; `GET /cron/jobs` returns a snapshot of all job statuses
+- WebSocket origin restriction: `gateway.allowed_ws_origins` config (env: `GATEWAY_ALLOWED_WS_ORIGINS`, comma-separated); when non-empty, both `/dashboard/ws` and `/channels/webchat/ws` upgrade handlers return `403 Forbidden` for unlisted origins; empty list allows all (backward compatible)
+- Configurable shutdown timeout: `gateway.shutdown_timeout_seconds` (env: `GATEWAY_SHUTDOWN_TIMEOUT_SECONDS`; default 30); `gateway.stop()` is wrapped with `tokio::time::timeout`; logs a warning if exceeded; displayed in `rustynail config check` output
+- `AgentManager::reload_skills_context()` async method to replace the active skills context without restart; `skills_context` field changed from `Option<String>` to `Arc<RwLock<Option<String>>>` to enable concurrent hot-reload
+
+### Changed
+- `Cargo.toml` bumped to `0.10.0`
+- `ToolsConfig` extended with `pdf_enabled: bool` and `image_enabled: bool`
+- `GatewayConfig` extended with `allowed_ws_origins: Vec<String>` and `shutdown_timeout_seconds: u64`
+- `Config` extended with top-level `cron: CronConfig` (default empty)
+- `AppState` and `HttpServerConfig` extended with `skills_config`, `cron_jobs`, and `allowed_ws_origins` fields
+- `dashboard_ws_handler` and `webchat_ws_handler` return type changed to `Response` to support conditional 403 on origin mismatch
+- Router gains `delete` import; new routes: `DELETE /admin/memory/:user_id`, `POST /admin/skills/reload`, `GET /admin/channels/health`, `GET /cron/jobs`
+- `rustynail config check` now prints WS origins, shutdown timeout, cron job count, PDF tool state, and image tool state
+
 ## [0.9.0] - 2026-03-18
 
 ### Added

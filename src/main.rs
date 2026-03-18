@@ -202,7 +202,15 @@ async fn cmd_start() -> Result<()> {
     }
 
     info!("Shutting down...");
-    gateway.stop().await?;
+    let shutdown_timeout = std::time::Duration::from_secs(config.gateway.shutdown_timeout_seconds);
+    match tokio::time::timeout(shutdown_timeout, gateway.stop()).await {
+        Ok(Ok(())) => info!("Gateway stopped cleanly"),
+        Ok(Err(e)) => tracing::error!("Gateway stop error: {}", e),
+        Err(_) => tracing::warn!(
+            "Gateway stop timed out after {}s",
+            config.gateway.shutdown_timeout_seconds
+        ),
+    }
 
     // Flush OTel spans if exporter was configured
     if config.otel.endpoint.is_some() {
@@ -361,6 +369,30 @@ fn cmd_config_check() -> Result<()> {
         } else {
             "disabled".to_string()
         }
+    );
+    println!(
+        "  WS origins:       {}",
+        if config.gateway.allowed_ws_origins.is_empty() {
+            "allow all".to_string()
+        } else {
+            config.gateway.allowed_ws_origins.join(", ")
+        }
+    );
+    println!(
+        "  Shutdown timeout: {}s",
+        config.gateway.shutdown_timeout_seconds
+    );
+    println!(
+        "  Cron jobs:        {}",
+        config.cron.jobs.len()
+    );
+    println!(
+        "  PDF tool:         {}",
+        if config.tools.pdf_enabled { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  Image tool:       {}",
+        if config.tools.image_enabled { "enabled" } else { "disabled" }
     );
 
     Ok(())

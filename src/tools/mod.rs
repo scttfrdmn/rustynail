@@ -2,6 +2,8 @@ pub mod calculator;
 pub mod calendar;
 pub mod filesystem;
 pub mod formatter;
+pub mod image;
+pub mod pdf;
 pub mod shell;
 pub mod web_fetch;
 pub mod web_search;

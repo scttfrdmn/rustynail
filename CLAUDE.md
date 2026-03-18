@@ -3,7 +3,7 @@
 ## Project Overview
 
 - **Name**: RustyNail
-- **Version**: 0.1.0
+- **Version**: 0.10.0
 - **GitHub**: https://github.com/scttfrdmn/rustynail
 - **License**: Apache 2.0
 - **Description**: High-performance personal AI assistant built with Rust and Agenkit-Rust. Connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact via chat.
@@ -168,6 +168,12 @@ Before drafting a milestone plan:
 | Criterion benchmarks | ✅ | — | BuckTooth has none |
 | Zero-credential test harness | ✅ | — | BuckTooth has none |
 | Shell completion | ✅ | ✅ | |
+| PDF analysis tool | ✅ | — | |
+| Image analysis tool | ✅ | — | |
+| Admin API (`/admin/*`) | ✅ | — | |
+| Cron scheduler | ✅ | — | |
+| `gateway.allowed_ws_origins` | ✅ | — | |
+| `gateway.shutdown_timeout_seconds` | ✅ | — | |
 
 Update this table at the start of each milestone planning session.
 
@@ -185,6 +191,7 @@ Update this table at the start of each milestone planning session.
 | v0.7.0 | MCP integration — `rustynail mcp serve`, MCP client connectivity, agenkit 0.83.0 | Closed (released 2026-03-18) |
 | v0.8.0 | BuckTooth Full Parity + Agent Skills — bearer token auth, web fetch tool, shell tool, MS Teams, Helm, benchmarks, zero-credential harness, skills | Closed (released 2026-03-18) |
 | v0.9.0 | Production Hardening — rate limiting, audit logging, body limits, timeouts, security metrics, SIGHUP hot-reload, LLM retry resilience | Closed (released 2026-03-18) |
+| v0.10.0 | BuckTooth Remaining Gaps — PDF analysis, image analysis, Admin API, Cron scheduler, WS origin restriction, configurable shutdown timeout | Open |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview

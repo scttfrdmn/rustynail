@@ -2,6 +2,7 @@ pub mod agents;
 pub mod audit;
 pub mod channels;
 pub mod config;
+pub mod cron;
 pub mod gateway;
 pub mod memory;
 pub mod skills;

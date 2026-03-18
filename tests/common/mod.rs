@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
+use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
 use rustynail::gateway::rate_limiter::RateLimiter;
@@ -24,6 +24,8 @@ pub fn make_test_config() -> Config {
             rate_limit: RateLimitConfig::default(),
             max_body_bytes: 1_048_576,
             request_timeout_seconds: 30,
+            allowed_ws_origins: Vec::new(),
+            shutdown_timeout_seconds: 30,
         },
         channels: ChannelsConfig {
             discord: None,
@@ -48,6 +50,7 @@ pub fn make_test_config() -> Config {
         mcp: Default::default(),
         skills: SkillsConfig::default(),
         audit: AuditConfig::default(),
+        cron: CronConfig::default(),
     }
 }
 
@@ -87,6 +90,9 @@ pub fn make_test_state() -> AppState {
         rate_limiter: RateLimiter::new(),
         audit: None,
         hot_config: default_hot_config(),
+        skills_config: SkillsConfig::default(),
+        cron_jobs: Vec::new(),
+        allowed_ws_origins: Vec::new(),
     }
 }
 
@@ -124,6 +130,9 @@ pub fn make_test_state_with_webhooks() -> (
         rate_limiter: RateLimiter::new(),
         audit: None,
         hot_config: default_hot_config(),
+        skills_config: SkillsConfig::default(),
+        cron_jobs: Vec::new(),
+        allowed_ws_origins: Vec::new(),
     };
     (state, wa_rx, tg_rx, sl_rx)
 }

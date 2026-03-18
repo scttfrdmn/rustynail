@@ -6,7 +6,8 @@ pub mod user_prefs;
 use crate::agents::AgentManager;
 use crate::audit::{AuditEvent, AuditLogger};
 use crate::channels::Channel;
-use crate::config::{Config, RateLimitConfig};
+use crate::config::{Config, RateLimitConfig, SkillsConfig};
+use crate::cron::CronScheduler;
 use crate::gateway::dashboard::MessageStats;
 use crate::gateway::rate_limiter::RateLimiter;
 use crate::memory::{
@@ -110,6 +111,10 @@ pub struct Gateway {
     audit: Option<Arc<AuditLogger>>,
     /// Hot-reloadable config subset shared with the HTTP layer.
     hot_config: Arc<RwLock<HotConfig>>,
+    /// Cron scheduler (None when no jobs configured).
+    cron_scheduler: Option<CronScheduler>,
+    /// Skills config snapshot (for admin /skills/reload).
+    skills_config: SkillsConfig,
 }
 
 impl Gateway {
@@ -278,6 +283,40 @@ impl Gateway {
             if let Err(e) = tool_registry.register(Arc::new(fmt_tool)) {
                 error!("Failed to register formatter tool: {}", e);
             }
+
+            // Register PDF analysis tool if enabled
+            if config.tools.pdf_enabled {
+                let api_base = config
+                    .agents
+                    .api_base
+                    .clone()
+                    .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+                let pdf_tool = crate::tools::pdf::PdfAnalysisTool::new(
+                    config.agents.api_key.clone(),
+                    api_base,
+                    config.agents.llm_model.clone(),
+                );
+                if let Err(e) = tool_registry.register(Arc::new(pdf_tool)) {
+                    error!("Failed to register pdf_analysis tool: {}", e);
+                }
+            }
+
+            // Register image analysis tool if enabled
+            if config.tools.image_enabled {
+                let api_base = config
+                    .agents
+                    .api_base
+                    .clone()
+                    .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+                let img_tool = crate::tools::image::ImageAnalysisTool::new(
+                    config.agents.api_key.clone(),
+                    api_base,
+                    config.agents.llm_model.clone(),
+                );
+                if let Err(e) = tool_registry.register(Arc::new(img_tool)) {
+                    error!("Failed to register image_analysis tool: {}", e);
+                }
+            }
         }
 
         // Discover skills if enabled
@@ -330,6 +369,18 @@ impl Gateway {
         // Build hot config
         let hot_config = Arc::new(RwLock::new(HotConfig::from_config(&config)));
 
+        // Build cron scheduler if jobs are configured
+        let cron_scheduler = if !config.cron.jobs.is_empty() {
+            Some(CronScheduler::new(
+                config.cron.jobs.clone(),
+                message_tx.clone(),
+            ))
+        } else {
+            None
+        };
+
+        let skills_config = config.skills.clone();
+
         Self {
             config,
             channels: Arc::new(RwLock::new(Vec::new())),
@@ -346,6 +397,8 @@ impl Gateway {
             rate_limiter,
             audit,
             hot_config,
+            cron_scheduler,
+            skills_config,
         }
     }
 
@@ -682,6 +735,13 @@ impl Gateway {
             format!("Basic {}", encoded)
         });
 
+        // Snapshot cron job statuses for HTTP layer
+        let cron_jobs = self
+            .cron_scheduler
+            .as_ref()
+            .map(|s| s.job_status())
+            .unwrap_or_default();
+
         // Start HTTP server
         let http_cfg = http::HttpServerConfig {
             port: self.config.gateway.http_port,
@@ -710,6 +770,9 @@ impl Gateway {
             rate_limiter: self.rate_limiter.clone(),
             audit: self.audit.clone(),
             hot_config: self.hot_config.clone(),
+            skills_config: self.skills_config.clone(),
+            cron_jobs,
+            allowed_ws_origins: self.config.gateway.allowed_ws_origins.clone(),
         };
 
         let http_task = tokio::spawn(async move {
@@ -718,6 +781,11 @@ impl Gateway {
             }
         });
         self.tasks.push(http_task);
+
+        // Start cron scheduler
+        if let Some(ref mut scheduler) = self.cron_scheduler {
+            scheduler.start();
+        }
 
         // Start all channels
         {
@@ -777,6 +845,11 @@ impl Gateway {
     pub async fn stop(&mut self) -> Result<()> {
         info!("Stopping gateway");
 
+        // Stop cron scheduler first
+        if let Some(ref mut scheduler) = self.cron_scheduler {
+            scheduler.stop();
+        }
+
         let _ = self.event_tx.send(GatewayEvent::Shutdown);
 
         {
@@ -826,6 +899,16 @@ impl Gateway {
 
     pub fn memory(&self) -> Arc<dyn MemoryStore> {
         self.memory.clone()
+    }
+
+    /// Return a clone of the agent manager (for admin API handlers).
+    pub fn agent_manager(&self) -> Arc<AgentManager> {
+        self.agent_manager.clone()
+    }
+
+    /// Return the skills config (for admin skills reload).
+    pub fn skills_config(&self) -> &SkillsConfig {
+        &self.skills_config
     }
 }
 

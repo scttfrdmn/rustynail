@@ -21,6 +21,9 @@ pub struct Config {
     /// Structured audit log configuration.
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Cron job scheduler configuration.
+    #[serde(default)]
+    pub cron: CronConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +52,14 @@ pub struct GatewayConfig {
     /// Handler timeout in seconds (default 30). Env: `GATEWAY_REQUEST_TIMEOUT_SECONDS`.
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
+
+    /// Allowed WebSocket upgrade origins. Empty = allow all. Env: `GATEWAY_ALLOWED_WS_ORIGINS` (comma-separated).
+    #[serde(default)]
+    pub allowed_ws_origins: Vec<String>,
+
+    /// Graceful shutdown timeout in seconds (default 30). Env: `GATEWAY_SHUTDOWN_TIMEOUT_SECONDS`.
+    #[serde(default = "default_shutdown_timeout_seconds")]
+    pub shutdown_timeout_seconds: u64,
 }
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
@@ -368,6 +379,36 @@ impl Default for ShellToolConfig {
     }
 }
 
+// ── Cron scheduler ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJobConfig {
+    /// Human-readable job name used in logs.
+    pub name: String,
+
+    /// Interval with suffix: `"30s"`, `"5m"`, `"2h"`, `"1d"`.
+    pub schedule: String,
+
+    /// Message text to inject on each tick.
+    pub message: String,
+
+    /// Channel ID to route the synthetic message to.
+    pub channel_id: String,
+
+    /// User ID to use for the synthetic message.
+    pub user_id: String,
+
+    /// Whether this job is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CronConfig {
+    #[serde(default)]
+    pub jobs: Vec<CronJobConfig>,
+}
+
 // ── MCP servers ───────────────────────────────────────────────────────────────
 
 /// Configuration for one MCP server connection.
@@ -534,6 +575,14 @@ pub struct ToolsConfig {
     /// Shell tool configuration (sub-key `tools.shell`).
     #[serde(default)]
     pub shell: ShellToolConfig,
+
+    /// Enable the PDF analysis tool. Env: `TOOLS_PDF_ENABLED`.
+    #[serde(default)]
+    pub pdf_enabled: bool,
+
+    /// Enable the image analysis tool. Env: `TOOLS_IMAGE_ENABLED`.
+    #[serde(default)]
+    pub image_enabled: bool,
 }
 
 impl Default for ToolsConfig {
@@ -544,6 +593,8 @@ impl Default for ToolsConfig {
             filesystem_root: None,
             web_search_api_key: None,
             shell: ShellToolConfig::default(),
+            pdf_enabled: false,
+            image_enabled: false,
         }
     }
 }
@@ -621,6 +672,10 @@ fn default_max_body_bytes() -> usize {
 }
 
 fn default_request_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_shutdown_timeout_seconds() -> u64 {
     30
 }
 
@@ -938,6 +993,14 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_request_timeout_seconds),
+                allowed_ws_origins: std::env::var("GATEWAY_ALLOWED_WS_ORIGINS")
+                    .ok()
+                    .map(|s| s.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect())
+                    .unwrap_or_default(),
+                shutdown_timeout_seconds: std::env::var("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_shutdown_timeout_seconds),
             },
             channels: ChannelsConfig {
                 discord,
@@ -1011,6 +1074,14 @@ impl Config {
                         .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
                         .unwrap_or_default(),
                 },
+                pdf_enabled: std::env::var("TOOLS_PDF_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                image_enabled: std::env::var("TOOLS_IMAGE_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
             },
             otel: OtelConfig {
                 endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
@@ -1076,6 +1147,7 @@ impl Config {
                     .unwrap_or(false),
                 path: std::env::var("AUDIT_PATH").unwrap_or_default(),
             },
+            cron: CronConfig::default(),
         })
     }
 }
