@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-03-18
+
+### Added
+- Teams HMAC-SHA256 activity validation: optional `TeamsAuthConfig.hmac_secret` field validates inbound Bot Framework activities using `Authorization: HMAC <hex>` header; env `TEAMS_HMAC_SECRET`; empty = skip validation (backward compatible)
+- Temporal memory decay in vector store: `VectorMemoryStore` ring buffer now stores `(message, timestamp)` pairs; `get_history()` returns messages sorted descending by exponential recency weight (`half_life = VECTOR_DECAY_HALF_LIFE_SECONDS`, default 3600s); `recency_weight()` helper: at half-life age ≈ 0.5
+- Token-based memory compaction: `SummarizationConfig.trigger_token_budget` (env `SUMMARIZATION_TRIGGER_TOKEN_BUDGET`; default 0 = disabled) triggers summarization when estimated token count (4 bytes ≈ 1 token) exceeds the budget, independently of the message-count threshold
+- WebSocket token streaming for webchat: `AgentManager::process_message_stream()` splits responses into 5-byte chunks emitted via an mpsc channel with 10ms delay; webchat WS handler streams `{"type":"token","content":"…"}` frames followed by `{"type":"done"}`; widget JS updated to build up streaming messages in place
+- OpenAI-compatible `/v1/chat/completions` endpoint (`src/gateway/openai_compat.rs`): supports non-streaming JSON response and SSE streaming (`"stream": true`) with `data: {…}` lines ending in `data: [DONE]`; `StreamEvent` enum re-used from `process_message_stream`
+
+### Changed
+- `Cargo.toml` bumped to `0.12.0`
+- `TeamsAuthConfig` extended with `hmac_secret: String`; `teams_webhook_receive` handler switches from `Json<TeamsActivity>` to `Bytes` extractor for pre-parse HMAC verification
+- `MemoryConfig` extended with `vector_decay_half_life_seconds: f64`; `VectorMemoryStore::new()` delegates to new `with_decay()` constructor; `Gateway::new()` passes configured half-life
+- `SummarizationConfig` extended with `trigger_token_budget: usize`
+- `AgentManager` gains `StreamEvent` enum and `process_message_stream()` method (requires `Arc<Self>`)
+- `HttpServerConfig` and `AppState` extended with `teams_hmac_secret: String`; wired from `config.channels.teams.auth.hmac_secret`
+- `gateway/mod.rs` adds `pub mod openai_compat`
+- Widget JS in `src/channels/webchat.rs` handles `token`, `done` frame types for in-place streaming display
+
 ## [0.11.0] - 2026-03-18
 
 ### Added

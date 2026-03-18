@@ -338,6 +338,11 @@ pub struct TeamsAuthConfig {
 
     #[serde(default)]
     pub app_password: String,
+
+    /// Optional HMAC-SHA256 shared secret for inbound activity validation.
+    /// Env: `TEAMS_HMAC_SECRET`. Empty = skip validation (backward compatible).
+    #[serde(default)]
+    pub hmac_secret: String,
 }
 
 // ── Skills ────────────────────────────────────────────────────────────────────
@@ -511,6 +516,11 @@ pub struct MemoryConfig {
     /// Memory summarization settings.
     #[serde(default)]
     pub summarization: SummarizationConfig,
+
+    /// Exponential decay half-life for vector memory retrieval scoring.
+    /// 0.0 = no decay. Env: `VECTOR_DECAY_HALF_LIFE_SECONDS`. Default 3600.0.
+    #[serde(default = "default_vector_decay_half_life")]
+    pub vector_decay_half_life_seconds: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +539,11 @@ pub struct SummarizationConfig {
     /// LLM model to use for summarization.
     #[serde(default = "default_summarization_model")]
     pub model: String,
+
+    /// Trigger summarization when estimated token count exceeds this.
+    /// 0 = disabled (message count only). Env: `SUMMARIZATION_TRIGGER_TOKEN_BUDGET`.
+    #[serde(default)]
+    pub trigger_token_budget: usize,
 }
 
 impl Default for SummarizationConfig {
@@ -538,6 +553,7 @@ impl Default for SummarizationConfig {
             trigger_at: default_summarization_trigger_at(),
             keep_recent: default_summarization_keep_recent(),
             model: default_summarization_model(),
+            trigger_token_budget: 0,
         }
     }
 }
@@ -555,6 +571,7 @@ impl Default for MemoryConfig {
             embedding_provider: default_embedding_provider(),
             embedding_model: default_embedding_model(),
             summarization: SummarizationConfig::default(),
+            vector_decay_half_life_seconds: default_vector_decay_half_life(),
         }
     }
 }
@@ -863,6 +880,10 @@ fn default_summarization_model() -> String {
     "claude-haiku-4-5-20251001".to_string()
 }
 
+fn default_vector_decay_half_life() -> f64 {
+    3600.0
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -1030,6 +1051,7 @@ impl Config {
                 auth: TeamsAuthConfig {
                     app_id,
                     app_password,
+                    hmac_secret: std::env::var("TEAMS_HMAC_SECRET").unwrap_or_default(),
                 },
             })
         } else {
@@ -1228,7 +1250,15 @@ impl Config {
                         .unwrap_or_else(default_summarization_keep_recent),
                     model: std::env::var("SUMMARIZATION_MODEL")
                         .unwrap_or_else(|_| default_summarization_model()),
+                    trigger_token_budget: std::env::var("SUMMARIZATION_TRIGGER_TOKEN_BUDGET")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
                 },
+                vector_decay_half_life_seconds: std::env::var("VECTOR_DECAY_HALF_LIFE_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_vector_decay_half_life),
             },
             mcp: McpConfig::default(),
             skills: SkillsConfig {

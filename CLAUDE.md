@@ -3,7 +3,7 @@
 ## Project Overview
 
 - **Name**: RustyNail
-- **Version**: 0.10.0
+- **Version**: 0.12.0
 - **GitHub**: https://github.com/scttfrdmn/rustynail
 - **License**: Apache 2.0
 - **Description**: High-performance personal AI assistant built with Rust and Agenkit-Rust. Connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact via chat.
@@ -125,7 +125,7 @@ Before drafting a milestone plan:
 2. List each gap with the source project (`BuckTooth`, `OpenClaw`, or `Both`) and a short description.
 3. Assign gaps to the milestone or a future one, and create GitHub issues for each.
 
-### Parity status (as of v0.11.0)
+### Parity status (as of v0.12.0)
 
 | Feature area | BuckTooth | OpenClaw | Notes |
 |---|---|---|---|
@@ -180,6 +180,11 @@ Before drafting a milestone plan:
 | Attachment auto-routing | ✅ | — | |
 | LLM retry jitter | ✅ | — | |
 | LLM provider fallback chain | ✅ | — | |
+| Teams HMAC-SHA256 validation | ✅ | — | |
+| Temporal memory decay | ✅ | — | |
+| Token-based memory compaction | ✅ | — | |
+| WebSocket token streaming | ✅ | — | |
+| OpenAI-compatible SSE endpoint | ✅ | — | |
 
 Update this table at the start of each milestone planning session.
 
@@ -199,7 +204,7 @@ Update this table at the start of each milestone planning session.
 | v0.9.0 | Production Hardening — rate limiting, audit logging, body limits, timeouts, security metrics, SIGHUP hot-reload, LLM retry resilience | Closed (released 2026-03-18) |
 | v0.10.0 | BuckTooth Remaining Gaps — PDF analysis, image analysis, Admin API, Cron scheduler, WS origin restriction, configurable shutdown timeout | Closed (released 2026-03-18) |
 | v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
-| v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
+| v0.12.0 | Streaming & Memory Intelligence — Teams HMAC, vector decay, token compaction, WS streaming, OpenAI SSE | Closed (released 2026-03-18) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 
 ## Architecture Overview

@@ -161,11 +161,26 @@ pub const WIDGET_JS: &str = r#"
     var base = RUSTYNAIL_BASE || (proto + '://' + location.host);
     ws = new WebSocket(base.replace(/^http/, 'ws') + '/channels/webchat/ws?session_id=' + sessionId);
 
+    var streamingEl = null;
+
     ws.onmessage = function(e) {
       try {
         var data = JSON.parse(e.data);
-        if (data.type === 'message') addMsg(ui.msgs, data.content, 'bot');
-        else if (data.type === 'welcome') addMsg(ui.msgs, data.content, 'bot');
+        if (data.type === 'message') {
+          addMsg(ui.msgs, data.content, 'bot');
+        } else if (data.type === 'welcome') {
+          addMsg(ui.msgs, data.content, 'bot');
+        } else if (data.type === 'token') {
+          if (!streamingEl) {
+            streamingEl = document.createElement('div');
+            streamingEl.className = 'rn-msg bot';
+            ui.msgs.appendChild(streamingEl);
+          }
+          streamingEl.textContent += data.content;
+          ui.msgs.scrollTop = ui.msgs.scrollHeight;
+        } else if (data.type === 'done') {
+          streamingEl = null;
+        }
       } catch(_) {}
     };
 

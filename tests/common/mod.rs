@@ -51,7 +51,14 @@ pub fn make_test_config() -> Config {
         tools: Default::default(),
         otel: Default::default(),
         dashboard: Default::default(),
-        memory: MemoryConfig::default(),
+        memory: MemoryConfig {
+            vector_decay_half_life_seconds: 3600.0,
+            summarization: rustynail::config::SummarizationConfig {
+                trigger_token_budget: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         mcp: Default::default(),
         skills: SkillsConfig::default(),
         audit: AuditConfig::default(),
@@ -87,6 +94,7 @@ pub fn make_test_state() -> AppState {
         webchat_sessions: None,
         webchat_tx: None,
         teams_tx: None,
+        teams_hmac_secret: String::new(),
         user_prefs: Arc::new(UserPreferences::new()),
         stats: MessageStats::new(),
         dashboard_expected_auth: None,
@@ -127,6 +135,7 @@ pub fn make_test_state_with_webhooks() -> (
         webchat_sessions: None,
         webchat_tx: None,
         teams_tx: None,
+        teams_hmac_secret: String::new(),
         user_prefs: Arc::new(UserPreferences::new()),
         stats: MessageStats::new(),
         dashboard_expected_auth: None,

@@ -4,11 +4,15 @@ use std::collections::HashMap;
 use crate::types::{ChannelHealth, Message};
 use anyhow::Result;
 use async_trait::async_trait;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ── Token cache ───────────────────────────────────────────────────────────────
 
@@ -94,6 +98,28 @@ impl TokenManager {
 
         Ok(token)
     }
+}
+
+// ── HMAC-SHA256 signature verification ───────────────────────────────────────
+
+/// Verify a Teams Bot Framework activity using HMAC-SHA256.
+///
+/// Teams signs requests with `Authorization: HMAC <hex(hmac_sha256(secret, body))>`.
+/// When `secret` is empty this function always returns `Ok(())` (backward compatible).
+pub fn verify_teams_signature(secret: &str, body: &[u8], authorization: &str) -> anyhow::Result<()> {
+    if secret.is_empty() {
+        return Ok(());
+    }
+    let provided_hex = authorization
+        .strip_prefix("HMAC ")
+        .ok_or_else(|| anyhow::anyhow!("Teams: Authorization header is not HMAC scheme"))?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Teams HMAC key error: {}", e))?;
+    mac.update(body);
+    if hex::encode(mac.finalize().into_bytes()) != provided_hex {
+        return Err(anyhow::anyhow!("Teams: HMAC signature mismatch"));
+    }
+    Ok(())
 }
 
 // ── Bot Framework Activity types ──────────────────────────────────────────────
@@ -277,5 +303,44 @@ impl Channel for TeamsChannel {
 
     fn is_running(&self) -> bool {
         self.running
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_hmac_header(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        format!("HMAC {}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn test_verify_teams_signature_valid() {
+        let secret = "mysecret";
+        let body = b"hello teams";
+        let header = make_hmac_header(secret, body);
+        assert!(verify_teams_signature(secret, body, &header).is_ok());
+    }
+
+    #[test]
+    fn test_verify_teams_signature_invalid() {
+        let result = verify_teams_signature("mysecret", b"body", "HMAC badhex");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_teams_signature_wrong_scheme() {
+        let result = verify_teams_signature("mysecret", b"body", "Bearer sometoken");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not HMAC scheme"));
+    }
+
+    #[test]
+    fn test_verify_teams_signature_empty_secret_skips() {
+        // Empty secret = validation disabled
+        assert!(verify_teams_signature("", b"anything", "no-auth-needed").is_ok());
     }
 }

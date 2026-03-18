@@ -1,4 +1,17 @@
 use crate::agents::fallback::FallbackAgent;
+
+// ── Streaming event ───────────────────────────────────────────────────────────
+
+/// Events emitted by [`AgentManager::process_message_stream`].
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A chunk of the response text.
+    Token(String),
+    /// The response is complete.
+    Done,
+    /// An error occurred.
+    Error(String),
+}
 use crate::config::{AgentRetryConfig, AgentsConfig, ToolsConfig};
 use crate::gateway::dashboard::MessageStats;
 use crate::tools::ToolRegistry;
@@ -431,6 +444,38 @@ impl AgentManager {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all LLM attempts failed")))
+    }
+
+    /// Process a message and emit response tokens via a channel.
+    ///
+    /// This simulates token-by-token streaming by splitting the completed
+    /// response into 5-byte chunks and emitting them with a small delay.
+    /// The method is forward-compatible with true per-token streaming if
+    /// agenkit adds that capability.
+    pub async fn process_message_stream(
+        self: Arc<Self>,
+        user_id: String,
+        message: String,
+    ) -> tokio::sync::mpsc::Receiver<StreamEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            match self.process_message(&user_id, &message).await {
+                Ok(text) => {
+                    for chunk in text.as_bytes().chunks(5) {
+                        let token = String::from_utf8_lossy(chunk).to_string();
+                        if tx.send(StreamEvent::Token(token)).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                    let _ = tx.send(StreamEvent::Done).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                }
+            }
+        });
+        rx
     }
 
     /// Clear conversation history for a user.

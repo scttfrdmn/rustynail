@@ -3,6 +3,7 @@ pub mod dashboard;
 pub mod deduplicator;
 pub mod formatter;
 pub mod http;
+pub mod openai_compat;
 pub mod rate_limiter;
 pub mod user_prefs;
 
@@ -209,7 +210,10 @@ impl Gateway {
                 }
             }
             "vector" => {
-                match VectorMemoryStore::new(config.agents.max_history) {
+                match VectorMemoryStore::with_decay(
+                    config.agents.max_history,
+                    config.memory.vector_decay_half_life_seconds,
+                ) {
                     Ok(store) => {
                         info!("Using vector memory store (in-process, simple embeddings)");
                         Arc::new(store)
@@ -808,6 +812,9 @@ impl Gateway {
             webchat_sessions,
             webchat_tx,
             teams_tx,
+            teams_hmac_secret: self.config.channels.teams.as_ref()
+                .map(|t| t.auth.hmac_secret.clone())
+                .unwrap_or_default(),
             user_prefs: self.user_prefs.clone(),
             stats: self.stats.clone(),
             dashboard_expected_auth,

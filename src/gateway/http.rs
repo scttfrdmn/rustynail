@@ -4,7 +4,7 @@ use crate::channels::slack::{
     parse_event as parse_slack_event, verify_slack_signature, SlackWebhookPayload,
 };
 use crate::channels::sms::parse_sms_webhook;
-use crate::channels::teams::{parse_activity, TeamsActivity};
+use crate::channels::teams::{parse_activity, verify_teams_signature, TeamsActivity};
 use crate::channels::telegram::{parse_update, TelegramUpdate};
 use crate::channels::testchan::TestChannel;
 use crate::channels::webchat::{WebchatSessions, WIDGET_JS};
@@ -69,6 +69,8 @@ pub struct HttpServerConfig {
     pub webchat_sessions: Option<WebchatSessions>,
     pub webchat_tx: Option<mpsc::UnboundedSender<Message>>,
     pub teams_tx: Option<mpsc::UnboundedSender<Message>>,
+    /// HMAC-SHA256 secret for Teams activity validation (empty = disabled).
+    pub teams_hmac_secret: String,
     pub user_prefs: Arc<UserPreferences>,
     pub stats: Arc<MessageStats>,
     pub dashboard_expected_auth: Option<String>,
@@ -110,6 +112,7 @@ pub struct AppState {
     pub webchat_sessions: Option<WebchatSessions>,
     pub webchat_tx: Option<mpsc::UnboundedSender<Message>>,
     pub teams_tx: Option<mpsc::UnboundedSender<Message>>,
+    pub teams_hmac_secret: String,
     pub user_prefs: Arc<UserPreferences>,
     pub stats: Arc<MessageStats>,
     pub dashboard_expected_auth: Option<String>,
@@ -614,6 +617,8 @@ async fn webchat_ws_handler(
 }
 
 async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_id: String) {
+    use crate::agents::StreamEvent;
+
     let sessions = match &state.webchat_sessions {
         Some(s) => s.clone(),
         None => {
@@ -626,12 +631,13 @@ async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_i
         }
     };
 
-    let (tx, mut rx) = broadcast::channel::<String>(32);
-    sessions.insert(session_id.clone(), tx);
+    // Keep a broadcast channel per session so outbound non-streaming messages
+    // (e.g. from other system paths) can still reach this socket.
+    let (bcast_tx, mut bcast_rx) = broadcast::channel::<String>(32);
+    sessions.insert(session_id.clone(), bcast_tx);
 
     info!("Webchat: session '{}' connected", session_id);
 
-    // Send welcome message if configured (we don't have config here; just connect)
     let _ = socket
         .send(WsMessage::Text(
             serde_json::json!({
@@ -645,8 +651,8 @@ async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_i
 
     loop {
         tokio::select! {
-            // Outbound: send queued messages to client
-            result = rx.recv() => {
+            // Outbound: non-streaming messages (e.g. system notifications)
+            result = bcast_rx.recv() => {
                 match result {
                     Ok(text) => {
                         if socket.send(WsMessage::Text(text)).await.is_err() {
@@ -657,23 +663,60 @@ async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_i
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
-            // Inbound: receive message from client and route to gateway
+            // Inbound: receive message from client
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
                         let val: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                         let content = val["content"].as_str().unwrap_or(&text).to_string();
 
-                        if let Some(ref tx) = state.webchat_tx {
-                            let channel_id = format!("webchat-{}", session_id);
-                            let gateway_msg = Message::new(
-                                channel_id,
-                                session_id.clone(),
-                                "webchat-user".to_string(),
-                                content,
-                            );
-                            if let Err(e) = tx.send(gateway_msg) {
-                                warn!("Webchat: failed to enqueue message: {}", e);
+                        // Stream the response token-by-token directly to this socket
+                        let mut stream_rx = state
+                            .agent_manager
+                            .clone()
+                            .process_message_stream(session_id.clone(), content)
+                            .await;
+
+                        let mut full_text = String::new();
+                        while let Some(event) = stream_rx.recv().await {
+                            match event {
+                                StreamEvent::Token(t) => {
+                                    full_text.push_str(&t);
+                                    let frame = serde_json::json!({
+                                        "type": "token",
+                                        "content": t,
+                                    })
+                                    .to_string();
+                                    if socket.send(WsMessage::Text(frame)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                StreamEvent::Done => {
+                                    let _ = socket
+                                        .send(WsMessage::Text(r#"{"type":"done"}"#.to_string()))
+                                        .await;
+                                    // Forward full response to webchat_tx for audit / metrics
+                                    if let Some(ref tx) = state.webchat_tx {
+                                        let channel_id = format!("webchat-{}", session_id);
+                                        let reply = Message::new(
+                                            channel_id,
+                                            "assistant".to_string(),
+                                            "RustyNail".to_string(),
+                                            full_text.clone(),
+                                        );
+                                        let _ = tx.send(reply);
+                                    }
+                                    break;
+                                }
+                                StreamEvent::Error(e) => {
+                                    let frame = serde_json::json!({
+                                        "type": "error",
+                                        "content": e,
+                                    })
+                                    .to_string();
+                                    let _ = socket.send(WsMessage::Text(frame)).await;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -693,8 +736,29 @@ async fn handle_webchat_socket(mut socket: WebSocket, state: AppState, session_i
 
 async fn teams_webhook_receive(
     State(state): State<AppState>,
-    Json(activity): Json<TeamsActivity>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
+    // HMAC-SHA256 validation (skipped when secret is empty)
+    if !state.teams_hmac_secret.is_empty() {
+        let auth = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if let Err(e) = verify_teams_signature(&state.teams_hmac_secret, &body, auth) {
+            warn!("Teams: HMAC validation failed: {}", e);
+            return StatusCode::UNAUTHORIZED;
+        }
+    }
+
+    let activity: TeamsActivity = match serde_json::from_slice(&body) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("Teams: failed to parse activity: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let tx = match &state.teams_tx {
         Some(tx) => tx,
         None => {
@@ -997,6 +1061,11 @@ pub fn create_router(state: AppState, max_body_bytes: usize, request_timeout_sec
         .route("/admin/channels/health", get(admin_channels_health_handler))
         // Cron jobs status
         .route("/cron/jobs", get(cron_jobs_handler))
+        // OpenAI-compatible chat completions (non-streaming + SSE streaming)
+        .route(
+            "/v1/chat/completions",
+            post(crate::gateway::openai_compat::openai_chat_completions),
+        )
         // Apply request body limit and handler timeout globally, then bearer auth.
         // TimeoutLayer requires HandleErrorLayer to convert BoxError → HTTP 408.
         .layer(middleware::from_fn_with_state(
@@ -1036,6 +1105,7 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
         webchat_sessions: cfg.webchat_sessions,
         webchat_tx: cfg.webchat_tx,
         teams_tx: cfg.teams_tx,
+        teams_hmac_secret: cfg.teams_hmac_secret,
         user_prefs: cfg.user_prefs,
         stats: cfg.stats,
         dashboard_expected_auth: cfg.dashboard_expected_auth,
@@ -1100,6 +1170,7 @@ mod tests {
             webchat_sessions: None,
             webchat_tx: None,
             teams_tx: None,
+            teams_hmac_secret: String::new(),
             user_prefs: Arc::new(UserPreferences::new()),
             stats: MessageStats::new(),
             dashboard_expected_auth: None,
