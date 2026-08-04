@@ -86,7 +86,10 @@ impl Channel for EmailChannel {
         let to_addr = if message.user_id.contains('@') {
             message.user_id.clone()
         } else {
-            warn!("EmailChannel: user_id '{}' is not an email address", message.user_id);
+            warn!(
+                "EmailChannel: user_id '{}' is not an email address",
+                message.user_id
+            );
             return Ok(());
         };
 
@@ -94,9 +97,9 @@ impl Channel for EmailChannel {
             .from(smtp_config.from_address.parse().map_err(|e| {
                 anyhow::anyhow!("invalid from address '{}': {}", smtp_config.from_address, e)
             })?)
-            .to(to_addr.parse().map_err(|e| {
-                anyhow::anyhow!("invalid to address '{}': {}", to_addr, e)
-            })?)
+            .to(to_addr
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid to address '{}': {}", to_addr, e))?)
             .subject("RustyNail")
             .multipart(
                 MultiPart::alternative().singlepart(
@@ -107,10 +110,7 @@ impl Channel for EmailChannel {
             )
             .map_err(|e| anyhow::anyhow!("email build error: {}", e))?;
 
-        let creds = Credentials::new(
-            smtp_config.username.clone(),
-            smtp_config.password.clone(),
-        );
+        let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
         let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)
             .map_err(|e| anyhow::anyhow!("SMTP relay error: {}", e))?
@@ -149,7 +149,10 @@ async fn imap_poll_loop(
     let mut last_uid: u32 = 0;
     let poll_interval = std::time::Duration::from_secs(30);
 
-    info!("Email IMAP poll loop started ({}:{})", config.imap.host, config.imap.port);
+    info!(
+        "Email IMAP poll loop started ({}:{})",
+        config.imap.host, config.imap.port
+    );
 
     loop {
         let host = config.imap.host.clone();
@@ -161,7 +164,15 @@ async fn imap_poll_loop(
         let current_last_uid = last_uid;
 
         let result = tokio::task::spawn_blocking(move || {
-            fetch_new_emails(&host, port, &username, &password, &inbox, &cid, current_last_uid)
+            fetch_new_emails(
+                &host,
+                port,
+                &username,
+                &password,
+                &inbox,
+                &cid,
+                current_last_uid,
+            )
         })
         .await;
 

@@ -86,11 +86,7 @@ impl Channel for SmsChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Twilio API error {}: {}",
-                status,
-                body
-            ));
+            return Err(anyhow::anyhow!("Twilio API error {}: {}", status, body));
         }
 
         Ok(())
@@ -147,9 +143,7 @@ pub fn verify_twilio_signature(
 /// Twilio sends `From`, `To`, `Body`, `MessageSid`, etc. as URL-encoded form fields.
 pub fn parse_sms_webhook(channel_id: &str, form: &[(String, String)]) -> Option<Message> {
     let get = |key: &str| -> Option<String> {
-        form.iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        form.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     };
 
     let from = get("From")?;

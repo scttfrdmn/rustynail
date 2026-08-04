@@ -4,9 +4,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
 use rustynail::gateway::http::{create_router, AppState};
-use rustynail::gateway::rate_limiter::RateLimiter;
-use rustynail::gateway::HotConfig;
-use rustynail::config::RateLimitConfig;
 use tower::ServiceExt;
 
 fn make_state_with_auth(password: &str) -> AppState {

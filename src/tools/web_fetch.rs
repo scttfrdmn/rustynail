@@ -150,10 +150,7 @@ fn strip_html(html: &str) -> String {
 
     // Join with spaces and collapse runs of whitespace
     let joined = parts.join(" ");
-    joined
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    joined.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

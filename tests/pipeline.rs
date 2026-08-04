@@ -1,12 +1,11 @@
 mod common;
 
 use rustynail::agents::AgentManager;
-use rustynail::config::{AgentsConfig, RateLimitConfig};
+use rustynail::config::AgentsConfig;
 use rustynail::gateway::chunker::MessageChunker;
-use rustynail::gateway::deduplicator::MessageDeduplicator;
 use rustynail::gateway::dashboard::MessageStats;
+use rustynail::gateway::deduplicator::MessageDeduplicator;
 use rustynail::gateway::handle_message_for_test_full;
-use rustynail::gateway::rate_limiter::RateLimiter;
 use rustynail::gateway::user_prefs::UserPreferences;
 use rustynail::memory::{InMemoryStore, MemoryStore};
 use rustynail::types::Message;
@@ -61,18 +60,34 @@ async fn test_pipeline_dedup_drops_duplicate() {
 
     // First message — should go through
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("alice", "chan1", "hello"),
-        None, None, None, None, false,
+        None,
+        None,
+        None,
+        None,
+        false,
     )
     .await
     .unwrap();
 
     // Exact same message — should be dropped by deduplicator
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("alice", "chan1", "hello"),
-        None, None, Some(dedup.clone()), None, false,
+        None,
+        None,
+        Some(dedup.clone()),
+        None,
+        false,
     )
     .await
     .unwrap();
@@ -83,9 +98,17 @@ async fn test_pipeline_dedup_drops_duplicate() {
     let dedup2 = Arc::new(Mutex::new(MessageDeduplicator::new(256)));
 
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("bob", "chan1", "unique"),
-        None, None, Some(dedup2.clone()), None, false,
+        None,
+        None,
+        Some(dedup2.clone()),
+        None,
+        false,
     )
     .await
     .unwrap();
@@ -93,9 +116,17 @@ async fn test_pipeline_dedup_drops_duplicate() {
     let before = sent.lock().await.len();
 
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("bob", "chan1", "unique"),
-        None, None, Some(dedup2.clone()), None, false,
+        None,
+        None,
+        Some(dedup2.clone()),
+        None,
+        false,
     )
     .await
     .unwrap();
@@ -113,10 +144,7 @@ async fn test_pipeline_multi_user_isolation() {
     let sent_b = chan_b.sent_handle();
 
     let channels: Arc<RwLock<Vec<Box<dyn rustynail::channels::Channel>>>> =
-        Arc::new(RwLock::new(vec![
-            Box::new(chan_a),
-            Box::new(chan_b),
-        ]));
+        Arc::new(RwLock::new(vec![Box::new(chan_a), Box::new(chan_b)]));
 
     let agent_mgr = stub_agent_manager();
     let mem = memory();
@@ -125,18 +153,34 @@ async fn test_pipeline_multi_user_isolation() {
 
     // User A sends a message to chan-a
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("userA", "chan-a", "ping from A"),
-        None, None, None, None, false,
+        None,
+        None,
+        None,
+        None,
+        false,
     )
     .await
     .unwrap();
 
     // User B sends a message to chan-b
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("userB", "chan-b", "ping from B"),
-        None, None, None, None, false,
+        None,
+        None,
+        None,
+        None,
+        false,
     )
     .await
     .unwrap();
@@ -172,9 +216,17 @@ async fn test_pipeline_chunking_splits_long_response() {
     let up = user_prefs();
 
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("user1", "discord-main", &long_input),
-        None, None, None, Some(chunker), false,
+        None,
+        None,
+        None,
+        Some(chunker),
+        false,
     )
     .await
     .unwrap();
@@ -219,9 +271,17 @@ async fn test_pipeline_formatting_slack_applied() {
     let up = user_prefs();
 
     handle_message_for_test_full(
-        &mem, &agent_mgr, &channels, &up, &s,
+        &mem,
+        &agent_mgr,
+        &channels,
+        &up,
+        &s,
         msg("user1", "slack-main", "**hello**"),
-        None, None, None, None, true, // formatting_enabled = true
+        None,
+        None,
+        None,
+        None,
+        true, // formatting_enabled = true
     )
     .await
     .unwrap();

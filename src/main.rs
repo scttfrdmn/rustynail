@@ -273,8 +273,7 @@ fn cmd_config_check() -> Result<()> {
         if config.memory.summarization.enabled {
             format!(
                 "enabled (trigger_at={}, keep_recent={})",
-                config.memory.summarization.trigger_at,
-                config.memory.summarization.keep_recent
+                config.memory.summarization.trigger_at, config.memory.summarization.keep_recent
             )
         } else {
             "disabled".to_string()
@@ -385,17 +384,22 @@ fn cmd_config_check() -> Result<()> {
         "  Shutdown timeout: {}s",
         config.gateway.shutdown_timeout_seconds
     );
-    println!(
-        "  Cron jobs:        {}",
-        config.cron.jobs.len()
-    );
+    println!("  Cron jobs:        {}", config.cron.jobs.len());
     println!(
         "  PDF tool:         {}",
-        if config.tools.pdf_enabled { "enabled" } else { "disabled" }
+        if config.tools.pdf_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
     println!(
         "  Image tool:       {}",
-        if config.tools.image_enabled { "enabled" } else { "disabled" }
+        if config.tools.image_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
 
     Ok(())
@@ -412,8 +416,7 @@ fn cmd_config_validate() -> Result<()> {
     // ── Check 1: config loads ─────────────────────────────────────────────────
     let config = match Config::load() {
         Ok(cfg) => {
-            let source = std::env::var("CONFIG_FILE")
-                .unwrap_or_else(|_| "(env vars)".to_string());
+            let source = std::env::var("CONFIG_FILE").unwrap_or_else(|_| "(env vars)".to_string());
             println!("[✓] Config loaded ({})", source);
             cfg
         }
@@ -437,7 +440,13 @@ fn cmd_config_validate() -> Result<()> {
     // ── Check 3: memory backend dependencies ─────────────────────────────────
     match config.memory.backend.as_str() {
         "redis" => {
-            if config.memory.redis_url.as_deref().map(|u| u.is_empty()).unwrap_or(true) {
+            if config
+                .memory
+                .redis_url
+                .as_deref()
+                .map(|u| u.is_empty())
+                .unwrap_or(true)
+            {
                 println!("[✗] Memory backend is redis but memory.redis_url is not set");
                 failures += 1;
             } else {
@@ -445,7 +454,13 @@ fn cmd_config_validate() -> Result<()> {
             }
         }
         "sqlite" => {
-            if config.memory.sqlite_path.as_deref().map(|p| p.is_empty()).unwrap_or(true) {
+            if config
+                .memory
+                .sqlite_path
+                .as_deref()
+                .map(|p| p.is_empty())
+                .unwrap_or(true)
+            {
                 println!("[✗] Memory backend is sqlite but memory.sqlite_path is not set");
                 failures += 1;
             } else {
@@ -453,7 +468,13 @@ fn cmd_config_validate() -> Result<()> {
             }
         }
         "postgres" => {
-            if config.memory.postgres_url.as_deref().map(|u| u.is_empty()).unwrap_or(true) {
+            if config
+                .memory
+                .postgres_url
+                .as_deref()
+                .map(|u| u.is_empty())
+                .unwrap_or(true)
+            {
                 println!("[✗] Memory backend is postgres but memory.postgres_url is not set");
                 failures += 1;
             } else {
@@ -477,7 +498,12 @@ fn cmd_config_validate() -> Result<()> {
 
 /// `rustynail completions <shell>` — print shell completion script.
 fn cmd_completions(shell: Shell) -> Result<()> {
-    clap_complete::generate(shell, &mut Cli::command(), "rustynail", &mut std::io::stdout());
+    clap_complete::generate(
+        shell,
+        &mut Cli::command(),
+        "rustynail",
+        &mut std::io::stdout(),
+    );
     Ok(())
 }
 
@@ -494,10 +520,8 @@ async fn cmd_mcp_serve() -> Result<()> {
 
     let config = Config::load()?;
 
-    let mut tools: Vec<Arc<dyn agenkit::Tool>> = vec![
-        Arc::new(CalculatorTool),
-        Arc::new(FormatterTool),
-    ];
+    let mut tools: Vec<Arc<dyn agenkit::Tool>> =
+        vec![Arc::new(CalculatorTool), Arc::new(FormatterTool)];
 
     if config.tools.enabled {
         if let Some(ref fs_root) = config.tools.filesystem_root {

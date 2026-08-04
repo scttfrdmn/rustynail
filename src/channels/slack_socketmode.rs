@@ -195,15 +195,14 @@ async fn socket_mode_loop(
                                 "events_api" => {
                                     // Acknowledge immediately
                                     if !envelope_id.is_empty() {
-                                        let ack =
-                                            serde_json::json!({ "envelope_id": envelope_id });
-                                        let _ = write
-                                            .send(WsMsg::Text(ack.to_string()))
-                                            .await;
+                                        let ack = serde_json::json!({ "envelope_id": envelope_id });
+                                        let _ = write.send(WsMsg::Text(ack.to_string())).await;
                                     }
 
                                     // Parse the inner event
-                                    if let Some(msg) = parse_socket_event(&val, &channel_id, &bot_token) {
+                                    if let Some(msg) =
+                                        parse_socket_event(&val, &channel_id, &bot_token)
+                                    {
                                         if let Err(e) = tx.send(msg) {
                                             error!("Slack Socket Mode: failed to enqueue: {}", e);
                                         }
@@ -212,11 +211,8 @@ async fn socket_mode_loop(
                                 other => {
                                     // Ack any unknown envelope
                                     if !envelope_id.is_empty() {
-                                        let ack =
-                                            serde_json::json!({ "envelope_id": envelope_id });
-                                        let _ = write
-                                            .send(WsMsg::Text(ack.to_string()))
-                                            .await;
+                                        let ack = serde_json::json!({ "envelope_id": envelope_id });
+                                        let _ = write.send(WsMsg::Text(ack.to_string())).await;
                                     }
                                     tracing::debug!("Slack WS: unhandled type '{}'", other);
                                 }
@@ -314,10 +310,5 @@ fn parse_socket_event(val: &Value, channel_id: &str, _bot_token: &str) -> Option
         text.len()
     );
 
-    Some(Message::new(
-        slack_channel,
-        user_id.clone(),
-        user_id,
-        text,
-    ))
+    Some(Message::new(slack_channel, user_id.clone(), user_id, text))
 }

@@ -1,8 +1,15 @@
+//! Shared test helpers.
+//!
+//! Cargo compiles this module separately into every integration test binary
+//! that declares `mod common;`. No single binary uses every helper, so unused
+//! items here are expected rather than dead — hence the crate-wide allow.
+#![allow(dead_code)]
+
 use anyhow::Result;
 use async_trait::async_trait;
 use rustynail::agents::AgentManager;
 use rustynail::channels::Channel;
-use rustynail::config::{AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, DeduplicationConfig, GatewayConfig, MemoryConfig, RateLimitConfig, SkillsConfig};
+use rustynail::config::{AgentsConfig, RateLimitConfig, SkillsConfig};
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::http::AppState;
 use rustynail::gateway::rate_limiter::RateLimiter;
@@ -40,6 +47,7 @@ pub fn make_test_state_stub() -> AppState {
         dashboard_expected_auth: None,
         api_token: None,
         test_channel: None,
+        test_tx: None,
         rate_limiter: RateLimiter::new(),
         audit: None,
         hot_config: Arc::new(RwLock::new(HotConfig {
@@ -52,59 +60,6 @@ pub fn make_test_state_stub() -> AppState {
         skills_config: SkillsConfig::default(),
         cron_jobs: Vec::new(),
         allowed_ws_origins: Vec::new(),
-    }
-}
-
-/// Minimal test config — no real channels, dummy api_key.
-pub fn make_test_config() -> Config {
-    Config {
-        gateway: GatewayConfig {
-            websocket_port: 18789,
-            http_port: 18081,
-            log_level: "error".to_string(),
-            api_token: None,
-            rate_limit: RateLimitConfig::default(),
-            max_body_bytes: 1_048_576,
-            request_timeout_seconds: 30,
-            allowed_ws_origins: Vec::new(),
-            shutdown_timeout_seconds: 30,
-            chunking_enabled: false,
-            chunking_limits: std::collections::HashMap::new(),
-            formatting_enabled: false,
-            auto_route_attachments: false,
-            deduplication: DeduplicationConfig::default(),
-        },
-        channels: ChannelsConfig {
-            discord: None,
-            whatsapp: None,
-            telegram: None,
-            slack: None,
-            sms: None,
-            webhook: None,
-            webchat: None,
-            email: None,
-            teams: None,
-            test_channel: false,
-        },
-        agents: AgentsConfig {
-            api_key: "test_key_unused".to_string(),
-            ..Default::default()
-        },
-        tools: Default::default(),
-        otel: Default::default(),
-        dashboard: Default::default(),
-        memory: MemoryConfig {
-            vector_decay_half_life_seconds: 3600.0,
-            summarization: rustynail::config::SummarizationConfig {
-                trigger_token_budget: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        mcp: Default::default(),
-        skills: SkillsConfig::default(),
-        audit: AuditConfig::default(),
-        cron: CronConfig::default(),
     }
 }
 
@@ -142,6 +97,7 @@ pub fn make_test_state() -> AppState {
         dashboard_expected_auth: None,
         api_token: None,
         test_channel: None,
+        test_tx: None,
         rate_limiter: RateLimiter::new(),
         audit: None,
         hot_config: default_hot_config(),
@@ -183,6 +139,7 @@ pub fn make_test_state_with_webhooks() -> (
         dashboard_expected_auth: None,
         api_token: None,
         test_channel: None,
+        test_tx: None,
         rate_limiter: RateLimiter::new(),
         audit: None,
         hot_config: default_hot_config(),

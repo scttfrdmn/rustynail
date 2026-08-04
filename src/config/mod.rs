@@ -112,7 +112,7 @@ impl Default for RateLimitConfig {
 
 // ── Audit logging ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditConfig {
     /// Enable structured audit logging (env: `AUDIT_ENABLED`).
     #[serde(default)]
@@ -122,15 +122,6 @@ pub struct AuditConfig {
     /// Env: `AUDIT_PATH`.
     #[serde(default)]
     pub path: String,
-}
-
-impl Default for AuditConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            path: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,7 +439,6 @@ pub struct McpServerEntry {
     pub transport: String,
 
     // ── stdio fields ──────────────────────────────────────────────────────────
-
     /// Command to spawn (stdio transport only).
     pub command: Option<String>,
 
@@ -461,7 +451,6 @@ pub struct McpServerEntry {
     pub env: Vec<(String, String)>,
 
     // ── http fields ───────────────────────────────────────────────────────────
-
     /// Base URL of the MCP HTTP server (http transport only).
     pub url: Option<String>,
 }
@@ -1094,7 +1083,12 @@ impl Config {
                     .unwrap_or_else(default_request_timeout_seconds),
                 allowed_ws_origins: std::env::var("GATEWAY_ALLOWED_WS_ORIGINS")
                     .ok()
-                    .map(|s| s.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|o| o.trim().to_string())
+                            .filter(|o| !o.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 shutdown_timeout_seconds: std::env::var("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS")
                     .ok()

@@ -1,6 +1,6 @@
 use crate::memory::MemoryStore;
-use agenkit::memory::vector_memory::{EmbeddingProvider, InMemoryVectorStore, VectorMemory};
 use agenkit::core::AgentError;
+use agenkit::memory::vector_memory::{EmbeddingProvider, InMemoryVectorStore, VectorMemory};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -62,12 +62,15 @@ fn recency_weight(half_life_secs: f64, age_secs: f64) -> f64 {
 /// messages without a semantic query). When `decay_half_life_seconds > 0` messages
 /// are returned sorted by recency weight (most recent first).
 ///
+/// Per-user ring buffer of `(message, arrival time)` pairs.
+type RingBuffer = Arc<RwLock<HashMap<String, Vec<(String, DateTime<Utc>)>>>>;
+
 /// All async agenkit operations run on a dedicated tokio runtime.
 pub struct VectorMemoryStore {
     rt: Arc<tokio::runtime::Runtime>,
     vector_memory: Arc<VectorMemory>,
     /// Secondary ring buffer: ordered recent messages with timestamps per user.
-    ring: Arc<RwLock<HashMap<String, Vec<(String, DateTime<Utc>)>>>>,
+    ring: RingBuffer,
     max_history: usize,
     /// Exponential decay half-life in seconds. 0 = no decay.
     decay_half_life_seconds: f64,
@@ -87,7 +90,10 @@ impl VectorMemoryStore {
         let store = Box::new(InMemoryVectorStore::new());
         let vector_memory = Arc::new(VectorMemory::new(embeddings, Some(store)));
 
-        info!("Vector memory store initialised (in-process, simple embeddings, half_life={}s)", decay_half_life_seconds);
+        info!(
+            "Vector memory store initialised (in-process, simple embeddings, half_life={}s)",
+            decay_half_life_seconds
+        );
         Ok(Self {
             rt: Arc::new(rt),
             vector_memory,
@@ -144,7 +150,9 @@ impl MemoryStore for VectorMemoryStore {
         let msg = message.clone();
         if let Err(e) = self.rt.block_on(async move {
             let agenkit_msg = agenkit::core::Message::with_text("user", &msg);
-            vm.store(&uid, agenkit_msg, None).await.map_err(|e| anyhow::anyhow!("{}", e))
+            vm.store(&uid, agenkit_msg, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
         }) {
             error!("VectorMemory store error: {}", e);
         }
@@ -179,7 +187,11 @@ mod tests {
     fn test_recency_weight_at_half_life() {
         let w = recency_weight(3600.0, 3600.0);
         // At exactly the half-life, weight should be ≈ 0.5
-        assert!((w - 0.5).abs() < 1e-6, "expected ≈0.5 at half-life, got {}", w);
+        assert!(
+            (w - 0.5).abs() < 1e-6,
+            "expected ≈0.5 at half-life, got {}",
+            w
+        );
     }
 
     #[test]

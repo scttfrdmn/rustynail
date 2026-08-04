@@ -100,7 +100,7 @@ mod tests {
         assert!(rl.check_and_record("user1", &c)); // 1
         assert!(rl.check_and_record("user1", &c)); // 2
         assert!(rl.check_and_record("user1", &c)); // 3 — hits the limit
-        // 4th message should be blocked
+                                                   // 4th message should be blocked
         assert!(!rl.check_and_record("user1", &c));
     }
 
@@ -110,8 +110,8 @@ mod tests {
         // window_seconds = 0 means the window expires immediately after each call
         let c = cfg(true, 2, 0);
         assert!(rl.check_and_record("user1", &c)); // 1st call — resets window, count = 1
-        // With window_seconds=0, elapsed() >= Duration::ZERO is always true,
-        // so the next call resets and allows.
+                                                   // With window_seconds=0, elapsed() >= Duration::ZERO is always true,
+                                                   // so the next call resets and allows.
         assert!(rl.check_and_record("user1", &c)); // window expired → reset, count = 1
         assert!(rl.check_and_record("user1", &c)); // window expired → reset, count = 1
     }

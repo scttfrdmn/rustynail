@@ -112,8 +112,7 @@ pub fn parse_webhook_body(
     body: &[u8],
 ) -> Option<Message> {
     let text = if let Some(ref jpath) = endpoint.extract_text {
-        extract_jsonpath(body, jpath)
-            .or_else(|| String::from_utf8(body.to_vec()).ok())
+        extract_jsonpath(body, jpath).or_else(|| String::from_utf8(body.to_vec()).ok())
     } else {
         String::from_utf8(body.to_vec()).ok()
     }?;
