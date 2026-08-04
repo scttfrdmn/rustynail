@@ -35,11 +35,17 @@ impl CronScheduler {
         if let Some(n) = s.strip_suffix('s') {
             n.parse::<u64>().ok().map(std::time::Duration::from_secs)
         } else if let Some(n) = s.strip_suffix('m') {
-            n.parse::<u64>().ok().map(|v| std::time::Duration::from_secs(v * 60))
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 60))
         } else if let Some(n) = s.strip_suffix('h') {
-            n.parse::<u64>().ok().map(|v| std::time::Duration::from_secs(v * 3600))
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 3600))
         } else if let Some(n) = s.strip_suffix('d') {
-            n.parse::<u64>().ok().map(|v| std::time::Duration::from_secs(v * 86400))
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 86400))
         } else {
             None
         }
@@ -139,7 +145,10 @@ mod tests {
             CronScheduler::parse_schedule("1d"),
             Some(std::time::Duration::from_secs(86400))
         );
-        assert_eq!(CronScheduler::parse_schedule("24h"), Some(std::time::Duration::from_secs(86400)));
+        assert_eq!(
+            CronScheduler::parse_schedule("24h"),
+            Some(std::time::Duration::from_secs(86400))
+        );
         assert_eq!(CronScheduler::parse_schedule("invalid"), None);
         assert_eq!(CronScheduler::parse_schedule(""), None);
     }

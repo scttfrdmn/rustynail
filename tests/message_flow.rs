@@ -6,7 +6,6 @@ use rustynail::config::AgentsConfig;
 use rustynail::gateway::dashboard::MessageStats;
 use rustynail::gateway::user_prefs::UserPreferences;
 use rustynail::types::Message;
-use rustynail::Gateway;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

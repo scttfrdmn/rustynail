@@ -7,7 +7,7 @@ use tracing::{error, info};
 
 /// Rough token estimator: 1 token ≈ 4 bytes (allocation-free, no external deps).
 fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Summarises old conversation history when it grows beyond a threshold,
@@ -88,7 +88,10 @@ impl MemorySummarizer {
                     for msg in keep_recent {
                         store.add_message(&uid, msg);
                     }
-                    info!("Summarised history for user {} ({} messages condensed)", uid, to_summarize_count);
+                    info!(
+                        "Summarised history for user {} ({} messages condensed)",
+                        uid, to_summarize_count
+                    );
                 }
                 Err(e) => {
                     error!("Summarisation error for user {}: {}", uid, e);
@@ -137,13 +140,20 @@ mod tests {
         assert_eq!(history.len(), 5, "pre-summarize, 5 messages");
 
         let total_tokens: usize = history.iter().map(|m| estimate_tokens(m)).sum();
-        assert!(total_tokens > 10, "total tokens {} should exceed budget 10", total_tokens);
+        assert!(
+            total_tokens > 10,
+            "total tokens {} should exceed budget 10",
+            total_tokens
+        );
 
         // Verify the token trigger condition would fire (count_trigger=false, token_trigger=true)
         let count_trigger = history.len() > 100;
         let token_trigger = total_tokens > 10;
         assert!(!count_trigger, "count trigger must not fire");
-        assert!(token_trigger, "token trigger must fire before count threshold");
+        assert!(
+            token_trigger,
+            "token trigger must fire before count threshold"
+        );
 
         // maybe_summarize spawns a tokio task; call it to verify no panic
         summarizer.maybe_summarize(store, "u1");

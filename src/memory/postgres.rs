@@ -126,14 +126,11 @@ impl MemoryStore for PostgresStore {
         let pool = self.pool.clone();
         let uid = user_id.to_string();
 
-        if let Err(e) = self
-            .rt
-            .block_on(
-                sqlx::query("DELETE FROM rustynail_messages WHERE user_id = $1")
-                    .bind(&uid)
-                    .execute(&pool),
-            )
-        {
+        if let Err(e) = self.rt.block_on(
+            sqlx::query("DELETE FROM rustynail_messages WHERE user_id = $1")
+                .bind(&uid)
+                .execute(&pool),
+        ) {
             error!("Postgres clear_history error: {}", e);
         }
     }

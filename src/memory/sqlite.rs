@@ -135,12 +135,11 @@ impl MemoryStore for SqliteStore {
         let pool = self.pool.clone();
         let uid = user_id.to_string();
 
-        if let Err(e) = self
-            .rt
-            .block_on(sqlx::query("DELETE FROM messages WHERE user_id = ?")
+        if let Err(e) = self.rt.block_on(
+            sqlx::query("DELETE FROM messages WHERE user_id = ?")
                 .bind(&uid)
-                .execute(&pool))
-        {
+                .execute(&pool),
+        ) {
             error!("SQLite clear_history error: {}", e);
         }
     }

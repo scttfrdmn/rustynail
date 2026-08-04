@@ -112,51 +112,49 @@ impl Tool for ImageAnalysisTool {
             .unwrap_or(DEFAULT_MAX_BYTES);
 
         // Fetch bytes + detect media type
-        let (bytes, media_type) =
-            if source.starts_with("http://") || source.starts_with("https://") {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-                    .build()
-                    .map_err(|e| {
-                        AgentError::Internal(format!("failed to build HTTP client: {}", e))
-                    })?;
+        let (bytes, media_type) = if source.starts_with("http://") || source.starts_with("https://")
+        {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| AgentError::Internal(format!("failed to build HTTP client: {}", e)))?;
 
-                let response = client
-                    .get(&source)
-                    .send()
-                    .await
-                    .map_err(|e| AgentError::Internal(format!("fetch error: {}", e)))?;
+            let response = client
+                .get(&source)
+                .send()
+                .await
+                .map_err(|e| AgentError::Internal(format!("fetch error: {}", e)))?;
 
-                if !response.status().is_success() {
-                    return Ok(ToolResult::error(format!(
-                        "HTTP {} for {}",
-                        response.status(),
-                        source
-                    )));
-                }
+            if !response.status().is_success() {
+                return Ok(ToolResult::error(format!(
+                    "HTTP {} for {}",
+                    response.status(),
+                    source
+                )));
+            }
 
-                let ct = response
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
+            let ct = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
 
-                let mt = detect_media_type(&source, ct.as_deref());
+            let mt = detect_media_type(&source, ct.as_deref());
 
-                let data = response
-                    .bytes()
-                    .await
-                    .map_err(|e| AgentError::Internal(format!("read error: {}", e)))?
-                    .to_vec();
+            let data = response
+                .bytes()
+                .await
+                .map_err(|e| AgentError::Internal(format!("read error: {}", e)))?
+                .to_vec();
 
-                (data, mt)
-            } else {
-                let data = tokio::fs::read(&source)
-                    .await
-                    .map_err(|e| AgentError::Internal(format!("file read error: {}", e)))?;
-                let mt = detect_media_type(&source, None);
-                (data, mt)
-            };
+            (data, mt)
+        } else {
+            let data = tokio::fs::read(&source)
+                .await
+                .map_err(|e| AgentError::Internal(format!("file read error: {}", e)))?;
+            let mt = detect_media_type(&source, None);
+            (data, mt)
+        };
 
         let media_type = match media_type {
             Some(mt) => mt,

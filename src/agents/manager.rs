@@ -152,15 +152,16 @@ impl AgentManager {
     /// When fallback providers are configured the primary is wrapped in a
     /// `FallbackAgent` that tries each fallback in order on capacity errors.
     async fn create_llm(&self) -> Result<Arc<dyn Agent>> {
-        let primary = self.create_llm_from_config(
-            &self.config.api_key,
-            &self.config.llm_model,
-            self.config.temperature,
-            self.config.api_base.as_deref(),
-            self.config.aws_region.as_deref(),
-            &self.config.llm_provider,
-        )
-        .await?;
+        let primary = self
+            .create_llm_from_config(
+                &self.config.api_key,
+                &self.config.llm_model,
+                self.config.temperature,
+                self.config.api_base.as_deref(),
+                self.config.aws_region.as_deref(),
+                &self.config.llm_provider,
+            )
+            .await?;
 
         if self.config.fallback_providers.is_empty() {
             return Ok(primary);
@@ -214,9 +215,7 @@ impl AgentManager {
                     api_key: api_key.to_string(),
                     model: model.to_string(),
                     temperature: temperature as f64,
-                    api_base: api_base
-                        .unwrap_or("https://api.openai.com/v1")
-                        .to_string(),
+                    api_base: api_base.unwrap_or("https://api.openai.com/v1").to_string(),
                     ..Default::default()
                 };
                 Arc::new(OpenAIAgent::new(config))
@@ -225,9 +224,7 @@ impl AgentManager {
                 let config = OllamaConfig {
                     model: model.to_string(),
                     temperature: temperature as f64,
-                    api_base: api_base
-                        .unwrap_or("http://localhost:11434")
-                        .to_string(),
+                    api_base: api_base.unwrap_or("http://localhost:11434").to_string(),
                     ..Default::default()
                 };
                 Arc::new(OllamaAgent::new(config))
@@ -261,9 +258,7 @@ impl AgentManager {
                 let config = LiteLLMConfig {
                     model: model.to_string(),
                     api_key: Some(api_key.to_string()),
-                    base_url: api_base
-                        .unwrap_or("http://localhost:4000")
-                        .to_string(),
+                    base_url: api_base.unwrap_or("http://localhost:4000").to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
@@ -273,9 +268,7 @@ impl AgentManager {
                 let config = OpenAICompatibleConfig {
                     model: model.to_string(),
                     api_key: Some(api_key.to_string()),
-                    base_url: api_base
-                        .unwrap_or("http://localhost:8000/v1")
-                        .to_string(),
+                    base_url: api_base.unwrap_or("http://localhost:8000/v1").to_string(),
                     ..Default::default()
                 };
                 Arc::new(OpenAICompatibleAgent::new(config))
@@ -287,9 +280,7 @@ impl AgentManager {
                     model: model.to_string(),
                     max_tokens: 1024,
                     temperature: temperature as f64,
-                    api_base: api_base
-                        .unwrap_or("https://api.anthropic.com")
-                        .to_string(),
+                    api_base: api_base.unwrap_or("https://api.anthropic.com").to_string(),
                     ..Default::default()
                 };
                 Arc::new(AnthropicAgent::new(config))
@@ -406,8 +397,7 @@ impl AgentManager {
                 if let Some(ref stats) = self.stats {
                     stats.record_llm_retry();
                 }
-                let base = self.retry_config.base_delay_ms
-                    * 2u64.saturating_pow(attempt - 1);
+                let base = self.retry_config.base_delay_ms * 2u64.saturating_pow(attempt - 1);
                 let delay_ms = if self.retry_config.jitter_enabled {
                     // ±20%: factor in [0.8, 1.2)
                     let nanos = std::time::SystemTime::now()
@@ -502,8 +492,6 @@ impl AgentManager {
 mod tests {
     use super::*;
     use crate::config::{AgentRetryConfig, AgentsConfig};
-    use agenkit::core::{AgentError, Message as AkMessage};
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn stub_config() -> AgentsConfig {
         AgentsConfig {
@@ -531,14 +519,24 @@ mod tests {
         let result = mgr.process_message("user1", "hello").await.unwrap();
         // ConversationalAgent passes full history to the agent; the stub echoes it all.
         // The user message "hello" must appear somewhere in the response.
-        assert!(result.contains("hello"), "expected 'hello' in response, got: {}", result);
-        assert!(result.starts_with("echo:"), "response should start with echo:, got: {}", result);
+        assert!(
+            result.contains("hello"),
+            "expected 'hello' in response, got: {}",
+            result
+        );
+        assert!(
+            result.starts_with("echo:"),
+            "response should start with echo:, got: {}",
+            result
+        );
     }
 
     #[tokio::test]
     async fn test_process_message_stream_emits_done() {
         let mgr = Arc::new(AgentManager::new(stub_config()));
-        let mut rx = mgr.process_message_stream("user1".to_string(), "hi".to_string()).await;
+        let mut rx = mgr
+            .process_message_stream("user1".to_string(), "hi".to_string())
+            .await;
         let mut got_done = false;
         while let Some(event) = rx.recv().await {
             if matches!(event, StreamEvent::Done) {
@@ -552,7 +550,9 @@ mod tests {
     #[tokio::test]
     async fn test_process_message_stream_emits_tokens() {
         let mgr = Arc::new(AgentManager::new(stub_config()));
-        let mut rx = mgr.process_message_stream("user1".to_string(), "hello".to_string()).await;
+        let mut rx = mgr
+            .process_message_stream("user1".to_string(), "hello".to_string())
+            .await;
         let mut assembled = String::new();
         while let Some(event) = rx.recv().await {
             match event {
@@ -562,38 +562,27 @@ mod tests {
             }
         }
         // Stub echoes the full history; "hello" must appear somewhere.
-        assert!(assembled.contains("hello"), "reassembled should contain 'hello', got: {}", assembled);
-        assert!(assembled.starts_with("echo:"), "should start with echo:, got: {}", assembled);
-    }
-
-    /// Agent that always fails, for testing retry behaviour.
-    struct AlwaysFailAgent {
-        calls: Arc<AtomicU32>,
-    }
-
-    #[async_trait::async_trait]
-    impl agenkit::core::Agent for AlwaysFailAgent {
-        fn name(&self) -> &str {
-            "always_fail"
-        }
-
-        async fn process(&self, _input: AkMessage) -> Result<AkMessage, AgentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(AgentError::ProcessingError("simulated failure".to_string()))
-        }
+        assert!(
+            assembled.contains("hello"),
+            "reassembled should contain 'hello', got: {}",
+            assembled
+        );
+        assert!(
+            assembled.starts_with("echo:"),
+            "should start with echo:, got: {}",
+            assembled
+        );
     }
 
     #[tokio::test]
     async fn test_retry_disabled_calls_once() {
-        let calls = Arc::new(AtomicU32::new(0));
-        // We can't easily inject a custom LLM into AgentManager without changing the API,
-        // but we can test the retry logic via stub: retry disabled means 1 attempt.
-        // Use stub (always succeeds), but test the retry configuration path with retry disabled.
+        // `AgentManager` builds its own agent internally, so a failing agent
+        // can't be injected without an API change. This exercises the
+        // retry-disabled configuration path against the always-succeeding stub;
+        // attempt counting is covered by the fallback tests in `fallback.rs`.
         let mgr = AgentManager::new(retry_config(false, 1));
-        // Stub succeeds, so just verify it works correctly when retry is disabled.
         let result = mgr.process_message("user1", "test").await;
         assert!(result.is_ok());
-        let _ = calls; // unused here since we use stub
     }
 
     #[tokio::test]
@@ -603,7 +592,15 @@ mod tests {
         let result = mgr.process_message("user1", "test").await;
         assert!(result.is_ok());
         let text = result.unwrap();
-        assert!(text.contains("test"), "response should contain 'test', got: {}", text);
-        assert!(text.starts_with("echo:"), "should start with echo:, got: {}", text);
+        assert!(
+            text.contains("test"),
+            "response should contain 'test', got: {}",
+            text
+        );
+        assert!(
+            text.starts_with("echo:"),
+            "should start with echo:, got: {}",
+            text
+        );
     }
 }

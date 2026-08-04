@@ -68,6 +68,9 @@ mod tests {
         d.seen("u", "b");
         // "a" should have been evicted
         d.seen("u", "c");
-        assert!(!d.seen("u", "a"), "evicted entry should not be detected as duplicate");
+        assert!(
+            !d.seen("u", "a"),
+            "evicted entry should not be detected as duplicate"
+        );
     }
 }

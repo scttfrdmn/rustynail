@@ -207,10 +207,14 @@ pub async fn openai_chat_completions(
             .into_response()
     } else {
         // Non-streaming path
-        match state.agent_manager.process_message(&user_id, &content).await {
+        match state
+            .agent_manager
+            .process_message(&user_id, &content)
+            .await
+        {
             Ok(text) => {
-                let prompt_tokens = (content.len() + 3) / 4;
-                let completion_tokens = (text.len() + 3) / 4;
+                let prompt_tokens = content.len().div_ceil(4);
+                let completion_tokens = text.len().div_ceil(4);
                 let resp = ChatCompletionResponse {
                     id: completion_id,
                     object: "chat.completion".to_string(),
@@ -284,6 +288,7 @@ mod tests {
             dashboard_expected_auth: None,
             api_token: None,
             test_channel: None,
+            test_tx: None,
             rate_limiter: RateLimiter::new(),
             audit: None,
             hot_config: Arc::new(RwLock::new(HotConfig {
@@ -324,7 +329,11 @@ mod tests {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(ct.contains("json"), "expected json content-type, got: {}", ct);
+        assert!(
+            ct.contains("json"),
+            "expected json content-type, got: {}",
+            ct
+        );
     }
 
     #[tokio::test]

@@ -103,9 +103,7 @@ impl SkillRegistry {
             return None;
         }
         let selected = &self.skills[..self.skills.len().min(max_active)];
-        let mut parts = vec![
-            "\n\n--- Skills / Behavioral Guidance ---".to_string(),
-        ];
+        let mut parts = vec!["\n\n--- Skills / Behavioral Guidance ---".to_string()];
         for skill in selected {
             parts.push(format!("\n## {}\n{}", skill.name, skill.content));
         }

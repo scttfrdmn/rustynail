@@ -1,12 +1,12 @@
 use crate::channels::Channel;
 use crate::config::TeamsConfig;
-use std::collections::HashMap;
 use crate::types::{ChannelHealth, Message};
 use anyhow::Result;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -49,8 +49,7 @@ impl TokenManager {
         }
 
         // Fetch a new token
-        let token_url =
-            "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
+        let token_url = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
 
         let client = reqwest::Client::new();
         let mut form: HashMap<&str, &str> = HashMap::new();
@@ -87,8 +86,7 @@ impl TokenManager {
             .await
             .map_err(|e| anyhow::anyhow!("failed to parse token response: {}", e))?;
 
-        let expires_at =
-            Instant::now() + Duration::from_secs(token_resp.expires_in);
+        let expires_at = Instant::now() + Duration::from_secs(token_resp.expires_in);
 
         let token = token_resp.access_token.clone();
         *guard = Some(TeamsTokenCache {
@@ -106,7 +104,11 @@ impl TokenManager {
 ///
 /// Teams signs requests with `Authorization: HMAC <hex(hmac_sha256(secret, body))>`.
 /// When `secret` is empty this function always returns `Ok(())` (backward compatible).
-pub fn verify_teams_signature(secret: &str, body: &[u8], authorization: &str) -> anyhow::Result<()> {
+pub fn verify_teams_signature(
+    secret: &str,
+    body: &[u8],
+    authorization: &str,
+) -> anyhow::Result<()> {
     if secret.is_empty() {
         return Ok(());
     }
@@ -183,20 +185,20 @@ pub fn parse_activity(channel_id: &str, activity: &TeamsActivity) -> Option<Mess
 
 pub struct TeamsChannel {
     id: String,
-    config: TeamsConfig,
     token_manager: Arc<TokenManager>,
     running: bool,
 }
 
 impl TeamsChannel {
     pub fn new(id: impl Into<String>, config: TeamsConfig) -> Self {
+        // Only the auth credentials are needed past construction; the rest of
+        // `config` is consumed by the HTTP layer (webhook secret) at startup.
         let token_manager = Arc::new(TokenManager::new(
             config.auth.app_id.clone(),
             config.auth.app_password.clone(),
         ));
         Self {
             id: id.into(),
-            config,
             token_manager,
             running: false,
         }
