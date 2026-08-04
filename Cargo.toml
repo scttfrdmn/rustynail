@@ -1,7 +1,10 @@
 [package]
 name = "rustynail"
-version = "0.13.0"
+version = "0.15.0"
 edition = "2021"
+# Highest MSRV among locked dependencies — the AWS SDK crates (via agenkit's
+# Bedrock adapter) require 1.94.1. Keep in sync with Dockerfile's builder image.
+rust-version = "1.94"
 authors = ["Scott Friedman <scttfrdmn@users.noreply.github.com>"]
 description = "RustyNail - High-performance AI assistant built with Rust and Agenkit"
 license = "Apache-2.0"
@@ -111,3 +114,10 @@ path = "src/main.rs"
 [[bench]]
 name = "gateway_benchmarks"
 harness = false
+
+# Zero-credential harness tests. They require a live instance
+# (CONFIG_FILE=configs/harness.yaml cargo run) and self-skip unless
+# HARNESS_URL is set, so they are safe to run in the default `cargo test`.
+[[test]]
+name = "harness_test"
+path = "tests/harness/harness_test.rs"
