@@ -20,6 +20,12 @@ pub struct TestChannel {
     running: bool,
 }
 
+/// Shared buffer of messages captured by a [`TestChannel`].
+///
+/// The gateway owns the channel itself (as a `Box<dyn Channel>`), so the HTTP
+/// layer holds one of these handles instead — both point at the same buffer.
+pub type CapturedMessages = Arc<Mutex<Vec<Message>>>;
+
 impl TestChannel {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
@@ -30,13 +36,17 @@ impl TestChannel {
     }
 
     /// Return a cloneable handle to the captured messages store.
-    pub fn captured_handle(&self) -> Arc<Mutex<Vec<Message>>> {
+    ///
+    /// Callers must use this rather than constructing a second `TestChannel`:
+    /// separate instances have separate buffers, so responses written by one
+    /// are invisible to the other.
+    pub fn captured_handle(&self) -> CapturedMessages {
         self.captured.clone()
     }
 
-    /// Drain and return all captured messages (used by the test HTTP endpoint).
-    pub async fn drain_responses(&self) -> Vec<Message> {
-        let mut guard = self.captured.lock().await;
+    /// Drain and return all messages captured so far.
+    pub async fn drain_captured(captured: &CapturedMessages) -> Vec<Message> {
+        let mut guard = captured.lock().await;
         guard.drain(..).collect()
     }
 }

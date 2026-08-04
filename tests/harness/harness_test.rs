@@ -5,9 +5,52 @@
 //!
 //! Set HARNESS_URL=http://localhost:8080 to enable these tests.
 //! Tests are skipped when HARNESS_URL is not set.
+//!
+//! `GET /test/responses` drains a single process-wide buffer, so these tests
+//! serialize on `HARNESS_LOCK` and drain any stale responses before injecting.
+//! Without that they steal each other's replies when run in parallel.
+
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+/// Async-aware so the guard can be held across the `await`s below.
+static HARNESS_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn harness_url() -> Option<String> {
     std::env::var("HARNESS_URL").ok()
+}
+
+/// Drain and discard anything left in the response buffer by a previous test.
+async fn drain_stale(client: &reqwest::Client, base: &str) {
+    let _ = client.get(format!("{}/test/responses", base)).send().await;
+}
+
+/// Poll `/test/responses` until at least `want` messages arrive, or time out.
+async fn collect_responses(
+    client: &reqwest::Client,
+    base: &str,
+    want: usize,
+) -> Vec<serde_json::Value> {
+    let mut collected = Vec::new();
+    for _ in 0..50 {
+        let body: serde_json::Value = client
+            .get(format!("{}/test/responses", base))
+            .send()
+            .await
+            .expect("responses request failed")
+            .json()
+            .await
+            .expect("parse json");
+
+        if let Some(arr) = body.as_array() {
+            collected.extend(arr.iter().cloned());
+        }
+        if collected.len() >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    collected
 }
 
 #[tokio::test]
@@ -32,8 +75,10 @@ async fn harness_echo() {
         Some(u) => u,
         None => return,
     };
+    let _guard = HARNESS_LOCK.lock().await;
 
     let client = reqwest::Client::new();
+    drain_stale(&client, &base).await;
 
     // Inject a message via POST /test/send
     let send_resp = client
@@ -47,26 +92,21 @@ async fn harness_echo() {
         .expect("send request failed");
     assert_eq!(send_resp.status(), 200);
 
-    // Give the async pipeline a moment to process
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // Retrieve responses
-    let responses_resp = client
-        .get(format!("{}/test/responses", base))
-        .send()
-        .await
-        .expect("responses request failed");
-    assert_eq!(responses_resp.status(), 200);
-
-    let responses: serde_json::Value = responses_resp.json().await.expect("parse json");
-    let arr = responses.as_array().expect("expected array");
+    let arr = collect_responses(&client, &base, 1).await;
     assert!(!arr.is_empty(), "expected at least one response");
 
-    // Stub agent in echo mode returns "echo: hello"
+    // The stub agent echoes the whole conversation the ConversationalAgent hands
+    // it (system prompt + history), so assert on the parts we control rather
+    // than an exact "echo: hello".
     let content = arr[0]["content"].as_str().unwrap_or("");
     assert!(
-        content.contains("echo: hello"),
-        "expected echo response, got: {}",
+        content.starts_with("echo:"),
+        "expected stub echo response, got: {}",
+        content
+    );
+    assert!(
+        content.contains("hello"),
+        "expected injected message in response, got: {}",
         content
     );
 }
@@ -77,8 +117,10 @@ async fn harness_multi() {
         Some(u) => u,
         None => return,
     };
+    let _guard = HARNESS_LOCK.lock().await;
 
     let client = reqwest::Client::new();
+    drain_stale(&client, &base).await;
 
     // Send two messages from different users
     for (user, msg) in [("user-a", "first"), ("user-b", "second")] {
@@ -91,17 +133,6 @@ async fn harness_multi() {
         assert_eq!(resp.status(), 200, "send failed for {}", user);
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let responses: serde_json::Value = client
-        .get(format!("{}/test/responses", base))
-        .send()
-        .await
-        .expect("responses failed")
-        .json()
-        .await
-        .expect("parse");
-
-    let arr = responses.as_array().expect("array");
+    let arr = collect_responses(&client, &base, 2).await;
     assert!(arr.len() >= 2, "expected 2 responses, got {}", arr.len());
 }

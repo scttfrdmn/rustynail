@@ -18,7 +18,7 @@ use crate::gateway::deduplicator::MessageDeduplicator;
 use crate::gateway::formatter::ResponseFormatter;
 use crate::gateway::rate_limiter::RateLimiter;
 use crate::memory::{
-    InMemoryStore, MemorySummarizer, MemoryStore, PostgresStore, RedisStore, SqliteStore,
+    InMemoryStore, MemoryStore, MemorySummarizer, PostgresStore, RedisStore, SqliteStore,
     VectorMemoryStore,
 };
 use crate::skills::SkillRegistry;
@@ -30,7 +30,7 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn, Instrument};
 
-use agenkit::protocols::{McpClient, McpHttpClient, McpStdioClient, mcp_tools_from_client};
+use agenkit::protocols::{mcp_tools_from_client, McpClient, McpHttpClient, McpStdioClient};
 use agenkit::Tool;
 use user_prefs::UserPreferences;
 
@@ -139,33 +139,31 @@ impl Gateway {
 
         // Select memory backend based on config
         let memory: Arc<dyn MemoryStore> = match config.memory.backend.as_str() {
-            "redis" => {
-                match &config.memory.redis_url {
-                    Some(url) => {
-                        match RedisStore::new(
-                            url,
-                            config.agents.max_history,
-                            config.memory.redis_ttl_seconds,
-                        ) {
-                            Ok(store) => {
-                                info!("Using Redis memory store (url={})", url);
-                                Arc::new(store)
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to create Redis store, falling back to in-memory: {}",
-                                    e
-                                );
-                                Arc::new(InMemoryStore::new(config.agents.max_history))
-                            }
+            "redis" => match &config.memory.redis_url {
+                Some(url) => {
+                    match RedisStore::new(
+                        url,
+                        config.agents.max_history,
+                        config.memory.redis_ttl_seconds,
+                    ) {
+                        Ok(store) => {
+                            info!("Using Redis memory store (url={})", url);
+                            Arc::new(store)
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to create Redis store, falling back to in-memory: {}",
+                                e
+                            );
+                            Arc::new(InMemoryStore::new(config.agents.max_history))
                         }
                     }
-                    None => {
-                        error!("memory.backend=redis but REDIS_URL not set; falling back to in-memory");
-                        Arc::new(InMemoryStore::new(config.agents.max_history))
-                    }
                 }
-            }
+                None => {
+                    error!("memory.backend=redis but REDIS_URL not set; falling back to in-memory");
+                    Arc::new(InMemoryStore::new(config.agents.max_history))
+                }
+            },
             "sqlite" => {
                 let path = config
                     .memory
@@ -184,31 +182,33 @@ impl Gateway {
                         Arc::new(store)
                     }
                     Err(e) => {
-                        error!("Failed to create SQLite store, falling back to in-memory: {}", e);
+                        error!(
+                            "Failed to create SQLite store, falling back to in-memory: {}",
+                            e
+                        );
                         Arc::new(InMemoryStore::new(config.agents.max_history))
                     }
                 }
             }
-            "postgres" => {
-                match &config.memory.postgres_url {
-                    Some(url) => {
-                        match PostgresStore::new(url, config.agents.max_history) {
-                            Ok(store) => {
-                                info!("Using PostgreSQL memory store");
-                                Arc::new(store)
-                            }
-                            Err(e) => {
-                                error!("Failed to create Postgres store, falling back to in-memory: {}", e);
-                                Arc::new(InMemoryStore::new(config.agents.max_history))
-                            }
-                        }
+            "postgres" => match &config.memory.postgres_url {
+                Some(url) => match PostgresStore::new(url, config.agents.max_history) {
+                    Ok(store) => {
+                        info!("Using PostgreSQL memory store");
+                        Arc::new(store)
                     }
-                    None => {
-                        error!("memory.backend=postgres but DATABASE_URL not set; falling back to in-memory");
+                    Err(e) => {
+                        error!(
+                            "Failed to create Postgres store, falling back to in-memory: {}",
+                            e
+                        );
                         Arc::new(InMemoryStore::new(config.agents.max_history))
                     }
+                },
+                None => {
+                    error!("memory.backend=postgres but DATABASE_URL not set; falling back to in-memory");
+                    Arc::new(InMemoryStore::new(config.agents.max_history))
                 }
-            }
+            },
             "vector" => {
                 match VectorMemoryStore::with_decay(
                     config.agents.max_history,
@@ -219,22 +219,22 @@ impl Gateway {
                         Arc::new(store)
                     }
                     Err(e) => {
-                        error!("Failed to create vector store, falling back to in-memory: {}", e);
+                        error!(
+                            "Failed to create vector store, falling back to in-memory: {}",
+                            e
+                        );
                         Arc::new(InMemoryStore::new(config.agents.max_history))
                     }
                 }
             }
-            _ => {
-                Arc::new(InMemoryStore::new(config.agents.max_history))
-            }
+            _ => Arc::new(InMemoryStore::new(config.agents.max_history)),
         };
 
         // Build summarizer if enabled
         let summarizer = if config.memory.summarization.enabled {
             info!(
                 "Memory summarization enabled (trigger_at={}, keep_recent={})",
-                config.memory.summarization.trigger_at,
-                config.memory.summarization.keep_recent
+                config.memory.summarization.trigger_at, config.memory.summarization.keep_recent
             );
             Some(Arc::new(MemorySummarizer::new(
                 config.memory.summarization.clone(),
@@ -536,8 +536,7 @@ impl Gateway {
         // Add SMS channel if enabled (webhook-based, routes handled by HTTP)
         if let Some(sms_config) = self.config.channels.sms.clone().filter(|c| c.enabled) {
             info!("Setting up SMS channel (Twilio webhook mode)");
-            let sms =
-                crate::channels::sms::SmsChannel::new("sms-main".to_string(), sms_config);
+            let sms = crate::channels::sms::SmsChannel::new("sms-main".to_string(), sms_config);
             self.register_channel(Box::new(sms)).await;
         }
 
@@ -555,18 +554,19 @@ impl Gateway {
         }
 
         // Add Webchat channel if enabled
-        let webchat_sessions = if let Some(wc_config) =
-            self.config.channels.webchat.clone().filter(|c| c.enabled)
-        {
-            info!("Setting up webchat channel");
-            let wc =
-                crate::channels::webchat::WebchatChannel::new("webchat-main".to_string(), wc_config);
-            let sessions = wc.sessions_handle();
-            self.register_channel(Box::new(wc)).await;
-            Some(sessions)
-        } else {
-            None
-        };
+        let webchat_sessions =
+            if let Some(wc_config) = self.config.channels.webchat.clone().filter(|c| c.enabled) {
+                info!("Setting up webchat channel");
+                let wc = crate::channels::webchat::WebchatChannel::new(
+                    "webchat-main".to_string(),
+                    wc_config,
+                );
+                let sessions = wc.sessions_handle();
+                self.register_channel(Box::new(wc)).await;
+                Some(sessions)
+            } else {
+                None
+            };
 
         // Add Email channel if enabled
         if let Some(em_config) = self.config.channels.email.clone().filter(|c| c.enabled) {
@@ -582,24 +582,22 @@ impl Gateway {
         // Add Microsoft Teams channel if enabled
         if let Some(teams_config) = self.config.channels.teams.clone().filter(|c| c.enabled) {
             info!("Setting up Microsoft Teams channel (webhook mode)");
-            let teams = crate::channels::teams::TeamsChannel::new(
-                "teams-main".to_string(),
-                teams_config,
-            );
+            let teams =
+                crate::channels::teams::TeamsChannel::new("teams-main".to_string(), teams_config);
             self.register_channel(Box::new(teams)).await;
         }
 
-        // Add test channel if enabled
+        // Add test channel if enabled.
+        //
+        // The gateway owns the channel; the HTTP layer gets a handle to the same
+        // captured-message buffer. Constructing a second `TestChannel` here would
+        // give HTTP a buffer nothing ever writes to.
         let test_channel_handle = if self.config.channels.test_channel {
             info!("Setting up zero-credential test channel (POST /test/send, GET /test/responses)");
-            let handle = Arc::new(
-                crate::channels::testchan::TestChannel::new("testchan-main".to_string())
-            );
-            let _ = crate::channels::testchan::TestChannel::new("testchan-main".to_string());
-            self.register_channel(Box::new(
-                crate::channels::testchan::TestChannel::new("testchan-main".to_string())
-            )).await;
-            Some(handle)
+            let channel = crate::channels::testchan::TestChannel::new("testchan-main".to_string());
+            let captured = channel.captured_handle();
+            self.register_channel(Box::new(channel)).await;
+            Some(captured)
         } else {
             None
         };
@@ -629,12 +627,18 @@ impl Gateway {
                             mcp_tools_from_client(std::sync::Arc::new(client))
                                 .await
                                 .unwrap_or_else(|e| {
-                                    error!("Failed to list tools from MCP server '{}': {}", server_cfg.name, e);
+                                    error!(
+                                        "Failed to list tools from MCP server '{}': {}",
+                                        server_cfg.name, e
+                                    );
                                     vec![]
                                 })
                         }
                         Err(e) => {
-                            error!("Failed to initialize MCP server '{}': {}", server_cfg.name, e);
+                            error!(
+                                "Failed to initialize MCP server '{}': {}",
+                                server_cfg.name, e
+                            );
                             continue;
                         }
                     }
@@ -666,12 +670,18 @@ impl Gateway {
                             mcp_tools_from_client(std::sync::Arc::new(client))
                                 .await
                                 .unwrap_or_else(|e| {
-                                    error!("Failed to list tools from MCP server '{}': {}", server_cfg.name, e);
+                                    error!(
+                                        "Failed to list tools from MCP server '{}': {}",
+                                        server_cfg.name, e
+                                    );
                                     vec![]
                                 })
                         }
                         Err(e) => {
-                            error!("Failed to initialize MCP server '{}': {}", server_cfg.name, e);
+                            error!(
+                                "Failed to initialize MCP server '{}': {}",
+                                server_cfg.name, e
+                            );
                             continue;
                         }
                     }
@@ -765,9 +775,7 @@ impl Gateway {
             None
         };
 
-        let webchat_tx = webchat_sessions
-            .as_ref()
-            .map(|_| self.message_tx.clone());
+        let webchat_tx = webchat_sessions.as_ref().map(|_| self.message_tx.clone());
 
         let teams_tx = self
             .config
@@ -812,13 +820,20 @@ impl Gateway {
             webchat_sessions,
             webchat_tx,
             teams_tx,
-            teams_hmac_secret: self.config.channels.teams.as_ref()
+            teams_hmac_secret: self
+                .config
+                .channels
+                .teams
+                .as_ref()
                 .map(|t| t.auth.hmac_secret.clone())
                 .unwrap_or_default(),
             user_prefs: self.user_prefs.clone(),
             stats: self.stats.clone(),
             dashboard_expected_auth,
             api_token: self.config.gateway.api_token.clone(),
+            test_tx: test_channel_handle
+                .as_ref()
+                .map(|_| self.message_tx.clone()),
             test_channel: test_channel_handle,
             rate_limiter: self.rate_limiter.clone(),
             audit: self.audit.clone(),
@@ -1035,10 +1050,7 @@ async fn handle_message_inner(
     // ── Deduplication ─────────────────────────────────────────────────────────
     if let Some(ref dedup) = deduplicator {
         if dedup.lock().await.seen(&message.user_id, &message.content) {
-            tracing::debug!(
-                "Duplicate message from '{}', dropping",
-                message.user_id
-            );
+            tracing::debug!("Duplicate message from '{}', dropping", message.user_id);
             return Ok(());
         }
     }
@@ -1072,8 +1084,7 @@ async fn handle_message_inner(
                 message.channel_id.clone(),
                 "assistant".to_string(),
                 "RustyNail".to_string(),
-                "⚠️ Rate limit exceeded. Please wait before sending another message."
-                    .to_string(),
+                "⚠️ Rate limit exceeded. Please wait before sending another message.".to_string(),
             );
             let channels = channels.read().await;
             for channel in channels.iter() {
