@@ -1,5 +1,90 @@
 use crate::agents::fallback::FallbackAgent;
 
+// ── Completion outcome (stateless path) ───────────────────────────────────────
+
+/// Token counts as reported by the provider.
+///
+/// This type only ever holds counts a provider actually returned. There is
+/// deliberately no constructor that estimates from string length: an estimate
+/// presented as a measurement is worse than an absent field, because a caller
+/// metering spend against it cannot tell that it is guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    /// Extract usage from an agenkit response `Message`'s metadata.
+    ///
+    /// Adapters disagree on key spelling — the Anthropic adapter emits
+    /// `input_tokens`/`output_tokens` while OpenAI, Ollama, Gemini, Bedrock,
+    /// LiteLLM and openai-compatible emit `prompt_tokens`/`completion_tokens`.
+    /// Both spellings are accepted. Returns `None` when the provider reported
+    /// nothing, which is the correct outcome for Ollama without token counts
+    /// and for any tool-using (`ReActAgent`) path.
+    fn from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Option<Self> {
+        let usage = metadata.get("usage")?;
+        let get = |a: &str, b: &str| -> Option<u64> {
+            usage
+                .get(a)
+                .or_else(|| usage.get(b))
+                .and_then(|v| v.as_u64())
+        };
+        let prompt_tokens = get("prompt_tokens", "input_tokens")?;
+        let completion_tokens = get("completion_tokens", "output_tokens")?;
+        let total_tokens = usage
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(prompt_tokens + completion_tokens);
+        Some(Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        })
+    }
+}
+
+/// Cost of a single completion, in a unit a caller can debit a ledger with.
+///
+/// `micro_usd` is the authoritative value and is computed as
+/// `round(usd × 1_000_000)` — rounded to nearest, never truncated. Truncation
+/// would desync a caller's local debit from the real charge by up to a
+/// micro-unit per call, which accumulates silently across a decomposition run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompletionCost {
+    pub amount_usd: f64,
+    pub micro_usd: i64,
+}
+
+impl CompletionCost {
+    pub fn from_usd(usd: f64) -> Self {
+        Self {
+            amount_usd: usd,
+            micro_usd: (usd * 1_000_000.0).round() as i64,
+        }
+    }
+}
+
+/// Result of a stateless completion.
+///
+/// Every field that a provider might not report is an `Option` and is omitted
+/// rather than defaulted when absent.
+#[derive(Debug, Clone)]
+pub struct CompletionOutcome {
+    pub text: String,
+    /// The model the provider says produced this response. Falls back to the
+    /// configured model name when the provider does not echo one.
+    pub model: String,
+    /// `true` when `model` came from the provider's own response rather than
+    /// from local configuration.
+    pub model_from_provider: bool,
+    pub usage: Option<TokenUsage>,
+    pub cost: Option<CompletionCost>,
+    pub finish_reason: Option<String>,
+}
+
 // ── Streaming event ───────────────────────────────────────────────────────────
 
 /// Events emitted by [`AgentManager::process_message_stream`].
@@ -53,6 +138,15 @@ pub struct AgentManager {
     stats: Option<Arc<MessageStats>>,
     /// LLM retry configuration.
     retry_config: AgentRetryConfig,
+    /// Model pricing table used to turn provider token counts into a cost.
+    /// Returns `Err` for an unpriced model rather than a zero, so an unknown
+    /// model surfaces as an absent cost instead of a free one.
+    pricing: agenkit::budget::ModelPricing,
+    /// Guards one-time seeding of provider-specific pricing entries. Seeding is
+    /// lazy rather than done in `new()` because the pricing table's API is async
+    /// and `new()` is not; doing it eagerly via `tokio::spawn` would race the
+    /// first request.
+    pricing_seeded: tokio::sync::OnceCell<()>,
 }
 
 impl AgentManager {
@@ -131,7 +225,53 @@ impl AgentManager {
             skills_context: Arc::new(RwLock::new(skills_context)),
             stats,
             retry_config,
+            pricing: agenkit::budget::ModelPricing::new(),
+            pricing_seeded: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The model name this manager will serve, before provider resolution.
+    ///
+    /// For the `stub` provider this is the stub's own model name rather than
+    /// `agents.llm_model`, which is left at its default in stub configurations
+    /// and would otherwise name a Claude model the stub cannot produce. Keeping
+    /// the two in step means the name a caller may request, the name that is
+    /// accepted, and the name reported back all agree.
+    pub fn configured_model(&self) -> &str {
+        if self.config.llm_provider == "stub" {
+            crate::agents::stub::STUB_MODEL
+        } else {
+            &self.config.llm_model
+        }
+    }
+
+    /// Register or override pricing for a model, so costs can be reported for
+    /// models the default table does not know (self-hosted, custom deployments).
+    pub async fn set_model_pricing(&self, info: agenkit::budget::pricing::ModelPricingInfo) {
+        self.pricing.update_pricing(info).await;
+    }
+
+    /// Seed provider-specific pricing entries once, before the first cost lookup.
+    ///
+    /// The shared table has no entry for the stub provider, so a zero-credential
+    /// run would report no cost and leave the cost path untested. The stub's
+    /// rates are synthetic; real models keep whatever the shared table says.
+    async fn ensure_pricing_seeded(&self) {
+        self.pricing_seeded
+            .get_or_init(|| async {
+                if self.config.llm_provider == "stub" {
+                    self.pricing
+                        .update_pricing(agenkit::budget::pricing::ModelPricingInfo {
+                            model: crate::agents::stub::STUB_MODEL.to_string(),
+                            provider: "stub".to_string(),
+                            input_cost_per_million: 1.0,
+                            output_cost_per_million: 2.0,
+                            metadata: None,
+                        })
+                        .await;
+                }
+            })
+            .await;
     }
 
     /// Register a tool with the agent manager. New agents will pick it up.
@@ -152,6 +292,14 @@ impl AgentManager {
     /// When fallback providers are configured the primary is wrapped in a
     /// `FallbackAgent` that tries each fallback in order on capacity errors.
     async fn create_llm(&self) -> Result<Arc<dyn Agent>> {
+        self.create_llm_with_max_tokens(None).await
+    }
+
+    /// As [`Self::create_llm`], with a per-request output-token ceiling.
+    ///
+    /// `max_tokens` is applied to the primary and to every fallback, so a
+    /// failover cannot quietly lift a ceiling the caller asked for.
+    async fn create_llm_with_max_tokens(&self, max_tokens: Option<u32>) -> Result<Arc<dyn Agent>> {
         let primary = self
             .create_llm_from_config(
                 &self.config.api_key,
@@ -160,6 +308,7 @@ impl AgentManager {
                 self.config.api_base.as_deref(),
                 self.config.aws_region.as_deref(),
                 &self.config.llm_provider,
+                max_tokens,
             )
             .await?;
 
@@ -177,6 +326,7 @@ impl AgentManager {
                     fb_cfg.api_base.as_deref(),
                     None,
                     &fb_cfg.provider,
+                    max_tokens,
                 )
                 .await
             {
@@ -199,6 +349,11 @@ impl AgentManager {
     }
 
     /// Build a single LLM adapter from explicit parameters.
+    ///
+    /// `max_tokens` caps output tokens for this adapter when `Some`; when `None`
+    /// each adapter keeps its own default. Ollama has no `max_tokens` knob in
+    /// agenkit's config, so the ceiling cannot be applied there.
+    #[allow(clippy::too_many_arguments)]
     async fn create_llm_from_config(
         &self,
         api_key: &str,
@@ -207,17 +362,21 @@ impl AgentManager {
         api_base: Option<&str>,
         aws_region: Option<&str>,
         provider: &str,
+        max_tokens: Option<u32>,
     ) -> Result<Arc<dyn Agent>> {
         let llm: Arc<dyn Agent> = match provider {
             "stub" => Arc::new(StubAgent::new()),
             "openai" => {
-                let config = OpenAIConfig {
+                let mut config = OpenAIConfig {
                     api_key: api_key.to_string(),
                     model: model.to_string(),
                     temperature: temperature as f64,
                     api_base: api_base.unwrap_or("https://api.openai.com/v1").to_string(),
                     ..Default::default()
                 };
+                if let Some(mt) = max_tokens {
+                    config.max_tokens = mt as i32;
+                }
                 Arc::new(OpenAIAgent::new(config))
             }
             "ollama" => {
@@ -230,24 +389,30 @@ impl AgentManager {
                 Arc::new(OllamaAgent::new(config))
             }
             "gemini" => {
-                let config = GeminiConfig {
+                let mut config = GeminiConfig {
                     api_key: api_key.to_string(),
                     model: model.to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
+                if let Some(mt) = max_tokens {
+                    config.max_tokens = Some(mt);
+                }
                 Arc::new(
                     GeminiAdapter::new(config)
                         .map_err(|e| anyhow::anyhow!("failed to create GeminiAdapter: {}", e))?,
                 )
             }
             "bedrock" => {
-                let config = BedrockConfig {
+                let mut config = BedrockConfig {
                     region: aws_region.unwrap_or("us-east-1").to_string(),
                     model: model.to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
+                if let Some(mt) = max_tokens {
+                    config.max_tokens = Some(mt);
+                }
                 Arc::new(
                     BedrockAdapter::new(config)
                         .await
@@ -255,22 +420,28 @@ impl AgentManager {
                 )
             }
             "litellm" => {
-                let config = LiteLLMConfig {
+                let mut config = LiteLLMConfig {
                     model: model.to_string(),
                     api_key: Some(api_key.to_string()),
                     base_url: api_base.unwrap_or("http://localhost:4000").to_string(),
                     temperature: Some(temperature),
                     ..Default::default()
                 };
+                if let Some(mt) = max_tokens {
+                    config.max_tokens = Some(mt);
+                }
                 Arc::new(LiteLLMAdapter::new(config))
             }
             "openai-compat" => {
-                let config = OpenAICompatibleConfig {
+                let mut config = OpenAICompatibleConfig {
                     model: model.to_string(),
                     api_key: Some(api_key.to_string()),
                     base_url: api_base.unwrap_or("http://localhost:8000/v1").to_string(),
                     ..Default::default()
                 };
+                if let Some(mt) = max_tokens {
+                    config.max_tokens = mt as i32;
+                }
                 Arc::new(OpenAICompatibleAgent::new(config))
             }
             _ => {
@@ -278,7 +449,7 @@ impl AgentManager {
                 let config = AnthropicConfig {
                     api_key: api_key.to_string(),
                     model: model.to_string(),
-                    max_tokens: 1024,
+                    max_tokens: max_tokens.unwrap_or(1024) as i32,
                     temperature: temperature as f64,
                     api_base: api_base.unwrap_or("https://api.anthropic.com").to_string(),
                     ..Default::default()
@@ -352,6 +523,188 @@ impl AgentManager {
             .to_string())
     }
 
+    /// Run a completion with **no conversation state at all**.
+    ///
+    /// Unlike [`Self::process_message`], this reads no per-user history, writes
+    /// none, and creates no entry in the per-user agent map. Two successive
+    /// calls are fully independent.
+    ///
+    /// That independence is the point rather than an optimisation. A caller that
+    /// decomposes a problem into sub-problems and treats sibling agreement as a
+    /// replication signal gets a meaningless signal if the siblings shared a
+    /// conversation history — each one would see its predecessors' answers and
+    /// agree for the wrong reason.
+    ///
+    /// The `messages` array is honoured in full. A leading `system` role becomes
+    /// the system prompt; the remaining turns are flattened into a single
+    /// `"role: content"` transcript because agenkit's `Agent` trait accepts one
+    /// `Message` per call. `RustyNail`'s own assistant-persona system prompt and
+    /// skills context are **not** applied — a caller supplying its own prompt
+    /// gets exactly that prompt.
+    ///
+    /// Tools are never attached: a `ReActAgent` loop makes N provider calls and
+    /// discards each response's usage metadata, so token counts and therefore
+    /// cost would be unrecoverable.
+    ///
+    /// Returns whatever the provider reported. `usage` and `cost` are `None`
+    /// when the provider did not report token counts or when the resolved model
+    /// has no pricing entry.
+    pub async fn complete_stateless(
+        &self,
+        messages: &[(String, String)],
+        max_tokens: Option<u32>,
+    ) -> Result<CompletionOutcome> {
+        let llm = self
+            .create_llm_with_max_tokens(max_tokens)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create LLM: {}", e))?;
+
+        // A leading system message becomes the system prompt. Anthropic's
+        // adapter extracts it from a Message whose role is "system"; the other
+        // adapters prepend it to the transcript.
+        let leading_system = messages.first().filter(|m| m.0 == "system");
+        let turns = if leading_system.is_some() {
+            &messages[1..]
+        } else {
+            messages
+        };
+
+        let transcript = if turns.len() == 1 && turns[0].0 == "user" {
+            // Single user turn: send it verbatim rather than prefixing "user: ",
+            // so a caller's prompt reaches the provider unmodified.
+            turns[0].1.clone()
+        } else {
+            turns
+                .iter()
+                .map(|(role, content)| format!("{}: {}", role, content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let prompt = match leading_system {
+            // The Anthropic adapter is the only one that lifts a system role out
+            // of the Message; for the rest, inlining is the only way the system
+            // text reaches the model at all. Inlining for every provider keeps
+            // the prompt identical across providers, which matters for replay.
+            Some((_, sys)) => format!("{}\n\n{}", sys, transcript),
+            None => transcript,
+        };
+
+        let input = agenkit::core::Message::with_text("user", prompt);
+
+        let max_attempts = if self.retry_config.enabled {
+            self.retry_config.max_attempts.max(1)
+        } else {
+            1
+        };
+
+        let mut last_error: Option<anyhow::Error> = None;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                if let Some(ref stats) = self.stats {
+                    stats.record_llm_retry();
+                }
+                let delay_ms = self.retry_delay_ms(attempt);
+                tracing::warn!(
+                    "stateless LLM attempt {}/{} failed, retrying in {}ms",
+                    attempt,
+                    max_attempts,
+                    delay_ms
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            match llm.process(input.clone()).await {
+                Ok(response) => return Ok(self.outcome_from_response(response).await),
+                Err(e) => last_error = Some(anyhow::anyhow!("agent error: {}", e)),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all LLM attempts failed")))
+    }
+
+    /// Build a `CompletionOutcome` from a provider response, reading token
+    /// counts and the resolved model name out of its metadata.
+    async fn outcome_from_response(&self, response: agenkit::core::Message) -> CompletionOutcome {
+        self.ensure_pricing_seeded().await;
+
+        let text = response
+            .content_as_str()
+            .unwrap_or("I'm sorry, I couldn't generate a response.")
+            .to_string();
+
+        // Adapters that echo the API's own `model` field (Anthropic, OpenAI,
+        // Ollama, LiteLLM, openai-compatible) give the resolved, versioned name
+        // — which is what a replayable record needs. Gemini and Bedrock echo the
+        // configured name instead, so this is not a guarantee we can make
+        // provider-independently; `model_from_provider` records which it was.
+        let provider_model = response
+            .metadata
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let model_from_provider = provider_model.is_some();
+        let model = provider_model.unwrap_or_else(|| self.configured_model().to_string());
+
+        let usage = TokenUsage::from_metadata(&response.metadata);
+
+        if let (Some(u), Some(stats)) = (usage, self.stats.as_ref()) {
+            stats.record_tokens(u.prompt_tokens, u.completion_tokens);
+        }
+
+        // Cost requires both real token counts and a pricing entry for the
+        // resolved model. `calculate` returns Err on an unknown model rather
+        // than 0.0, so an unpriced model yields an absent cost, not a free one.
+        let cost = match usage {
+            Some(u) => match self
+                .pricing
+                .calculate(
+                    &model,
+                    u.prompt_tokens as usize,
+                    u.completion_tokens as usize,
+                )
+                .await
+            {
+                Ok(usd) => Some(CompletionCost::from_usd(usd)),
+                Err(e) => {
+                    tracing::debug!("no cost for model '{}': {}", model, e);
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let finish_reason = response
+            .metadata
+            .get("finish_reason")
+            .or_else(|| response.metadata.get("stop_reason"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        CompletionOutcome {
+            text,
+            model,
+            model_from_provider,
+            usage,
+            cost,
+            finish_reason,
+        }
+    }
+
+    /// Retry backoff for `attempt` (1-based), with optional ±20% jitter.
+    fn retry_delay_ms(&self, attempt: u32) -> u64 {
+        let base = self.retry_config.base_delay_ms * 2u64.saturating_pow(attempt - 1);
+        if !self.retry_config.jitter_enabled {
+            return base;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let jitter = 0.8 + (nanos % 400) as f64 / 1000.0;
+        (base as f64 * jitter) as u64
+    }
+
     /// Process a message for a specific user, maintaining per-user conversation history.
     ///
     /// When retry is enabled, failed LLM calls are retried with exponential backoff.
@@ -397,18 +750,7 @@ impl AgentManager {
                 if let Some(ref stats) = self.stats {
                     stats.record_llm_retry();
                 }
-                let base = self.retry_config.base_delay_ms * 2u64.saturating_pow(attempt - 1);
-                let delay_ms = if self.retry_config.jitter_enabled {
-                    // ±20%: factor in [0.8, 1.2)
-                    let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_nanos())
-                        .unwrap_or(0);
-                    let jitter = 0.8 + (nanos % 400) as f64 / 1000.0;
-                    (base as f64 * jitter) as u64
-                } else {
-                    base
-                };
+                let delay_ms = self.retry_delay_ms(attempt);
                 tracing::warn!(
                     "LLM attempt {}/{} for user '{}' failed, retrying in {}ms",
                     attempt,
@@ -511,6 +853,186 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    // ── Stateless completion / metering ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_stateless_reports_usage_and_cost_from_provider() {
+        let mgr = AgentManager::new(stub_config());
+        let out = mgr
+            .complete_stateless(&[("user".to_string(), "hello".to_string())], None)
+            .await
+            .unwrap();
+
+        let usage = out.usage.expect("stub reports usage");
+        assert!(usage.prompt_tokens > 0 && usage.completion_tokens > 0);
+        assert_eq!(
+            usage.total_tokens,
+            usage.prompt_tokens + usage.completion_tokens
+        );
+
+        let cost = out.cost.expect("stub has seeded pricing");
+        assert_eq!(
+            cost.micro_usd,
+            (cost.amount_usd * 1_000_000.0).round() as i64
+        );
+        assert!(cost.micro_usd > 0);
+
+        assert_eq!(out.model, crate::agents::stub::STUB_MODEL);
+        assert!(out.model_from_provider, "stub echoes its own model name");
+    }
+
+    #[tokio::test]
+    async fn test_unpriced_model_yields_no_cost() {
+        // Token counts are present but the resolved model has no pricing entry.
+        // The cost field must be absent rather than 0.0: a zero cost reads as a
+        // free call, so a caller debiting a ledger against it under-counts spend
+        // with no way to notice. `ModelPricing::calculate` returns Err for an
+        // unknown model precisely so this stays distinguishable.
+        let mgr = AgentManager::new(stub_config());
+        let mut response = agenkit::core::Message::with_text("assistant", "hi");
+        response.metadata.insert(
+            "model".to_string(),
+            serde_json::json!("model-with-no-pricing-entry"),
+        );
+        response.metadata.insert(
+            "usage".to_string(),
+            serde_json::json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
+        );
+
+        let out = mgr.outcome_from_response(response).await;
+        assert!(out.usage.is_some(), "usage was reported and must survive");
+        assert!(
+            out.cost.is_none(),
+            "an unpriced model must yield no cost, not a zero cost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_absent_provider_usage_is_not_estimated() {
+        // A provider that reports nothing (Ollama without token counts, or any
+        // ReAct path) must produce absent fields, never a len()/4 guess.
+        let mgr = AgentManager::new(stub_config());
+        let response = agenkit::core::Message::with_text("assistant", "a fairly long response");
+        let out = mgr.outcome_from_response(response).await;
+        assert!(
+            out.usage.is_none(),
+            "no provider usage means no usage field"
+        );
+        assert!(out.cost.is_none(), "no usage means no cost");
+        assert!(!out.model_from_provider);
+    }
+
+    #[tokio::test]
+    async fn test_usage_accepts_anthropic_key_spelling() {
+        // Anthropic emits input_tokens/output_tokens; everything else emits
+        // prompt_tokens/completion_tokens. Both must parse, or cost silently
+        // disappears on whichever provider spells it the other way.
+        let mgr = AgentManager::new(stub_config());
+        let mut response = agenkit::core::Message::with_text("assistant", "hi");
+        response.metadata.insert(
+            "usage".to_string(),
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3}),
+        );
+        let out = mgr.outcome_from_response(response).await;
+        let usage = out.usage.expect("input_tokens spelling must be accepted");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
+        // total_tokens was absent upstream and is derived, not invented.
+        assert_eq!(usage.total_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn test_stateless_writes_no_history() {
+        // The per-user agent map must stay empty: no history to read, none to
+        // write, and no per-user agent created as a side effect.
+        let mgr = AgentManager::new(stub_config());
+        for _ in 0..3 {
+            mgr.complete_stateless(&[("user".to_string(), "hello".to_string())], None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            mgr.active_users().await,
+            0,
+            "stateless calls must not create per-user agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stateless_calls_are_independent() {
+        let mgr = AgentManager::new(stub_config());
+        let first = mgr
+            .complete_stateless(&[("user".to_string(), "ALPHAMARK".to_string())], None)
+            .await
+            .unwrap();
+        let second = mgr
+            .complete_stateless(&[("user".to_string(), "BETAMARK".to_string())], None)
+            .await
+            .unwrap();
+        assert!(first.text.contains("ALPHAMARK"));
+        assert!(second.text.contains("BETAMARK"));
+        assert!(
+            !second.text.contains("ALPHAMARK"),
+            "state leaked between stateless calls: {}",
+            second.text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_user_turn_is_sent_verbatim() {
+        // A lone user message must reach the provider unmodified — no "user: "
+        // prefix — so a caller's prompt is the prompt the model sees.
+        let mgr = AgentManager::new(stub_config());
+        let out = mgr
+            .complete_stateless(&[("user".to_string(), "EXACTPROMPT".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(out.text, "echo: EXACTPROMPT");
+    }
+
+    #[tokio::test]
+    async fn test_system_message_is_included_in_prompt() {
+        let mgr = AgentManager::new(stub_config());
+        let out = mgr
+            .complete_stateless(
+                &[
+                    ("system".to_string(), "SYSPART".to_string()),
+                    ("user".to_string(), "USERPART".to_string()),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(out.text.contains("SYSPART"), "got: {}", out.text);
+        assert!(out.text.contains("USERPART"), "got: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn test_configured_model_matches_stub_provider() {
+        // The name a caller may request, the name accepted, and the name
+        // reported back must all agree — otherwise a stub deployment refuses
+        // requests for the only model it can actually serve.
+        let mgr = AgentManager::new(stub_config());
+        assert_eq!(mgr.configured_model(), crate::agents::stub::STUB_MODEL);
+        let out = mgr
+            .complete_stateless(&[("user".to_string(), "x".to_string())], None)
+            .await
+            .unwrap();
+        assert_eq!(out.model, mgr.configured_model());
+    }
+
+    #[test]
+    fn test_micro_usd_uses_round_not_truncate() {
+        // round(usd × 1e6), to nearest. Truncation would desync a caller's local
+        // debit from the real charge by up to a micro-unit per call.
+        assert_eq!(CompletionCost::from_usd(0.0000015).micro_usd, 2);
+        assert_eq!(CompletionCost::from_usd(0.0000014).micro_usd, 1);
+        assert_eq!(CompletionCost::from_usd(0.0).micro_usd, 0);
+        assert_eq!(CompletionCost::from_usd(1.5).micro_usd, 1_500_000);
+        // The case truncation gets wrong: 2.999999 µ¢ is 3, not 2.
+        assert_eq!(CompletionCost::from_usd(0.0000029999).micro_usd, 3);
     }
 
     #[tokio::test]

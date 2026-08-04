@@ -4,3 +4,4 @@ pub mod stub;
 
 pub use manager::AgentManager;
 pub use manager::StreamEvent;
+pub use manager::{CompletionCost, CompletionOutcome, TokenUsage};

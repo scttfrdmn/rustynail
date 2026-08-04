@@ -186,7 +186,7 @@ Before drafting a milestone plan:
 | MCP client connectivity | ✅ | ✅ | |
 | Agent skills | ✅ | ✅ | |
 | Bearer token auth | ✅ | ✅ | |
-| Token/cost accounting | ✅ | ✅ | |
+| Token/cost accounting | ⚠️ | ✅ | Partial. Real provider token counts and USD/micro-USD cost on `/v1/chat/completions` with `stateless: true` only. The stateful path routes through wrappers that discard provider usage metadata, so it reports none — absent by design, not estimated. No per-user or per-channel spend ledger. Previously marked ✅ for code that did not exist (#109) |
 | Helm chart | ✅ | ✅ | |
 | Docker / distroless image | ✅ | ✅ | |
 | CI/CD (GitHub Actions) | ✅ | ✅ | |
@@ -214,9 +214,14 @@ Before drafting a milestone plan:
 Update this table at the start of each milestone planning session.
 
 A ✅ means the feature exists **and has been verified to work**. Before marking a
-row ✅, exercise it — two rows in this table previously claimed parity for code
+row ✅, exercise it — three rows in this table previously claimed parity for code
 that was shipped but non-functional (the test harness returned an empty buffer,
-and Docker builds failed on an MSRV too low for the locked dependencies).
+Docker builds failed on an MSRV too low for the locked dependencies, and
+token/cost accounting was ✅ for code that did not exist at all).
+
+A ⚠️ means partially implemented: the Notes column states exactly what works and
+what does not. Prefer ⚠️ with a precise note over a ✅ that overstates — an
+inaccurate ✅ is how all three incidents above went unnoticed.
 
 ## Milestones
 

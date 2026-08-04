@@ -372,6 +372,17 @@ OpenAI-compatible chat completions. Accepts OpenAI SDK clients.
 **Auth required:** yes (when token configured) — use the same bearer token
 **Content-Type:** `application/json`
 
+**Request fields:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | See [Model resolution](#model-resolution). Aliases are accepted; a different model is refused. |
+| `messages` | array | `{role, content}`. All roles and all turns are used, including `system`. |
+| `stream` | bool | SSE streaming. Not supported with `stateless: true`. |
+| `user` | string | Conversation identity for the stateful path. Ignored when `stateless: true`. |
+| `max_tokens` | int | Output-token ceiling. Applied to the primary provider *and* every fallback, so a failover cannot lift it. Not supported on Ollama (agenkit's config exposes no equivalent). Must be positive. |
+| `stateless` | bool | Run with no conversation state. Not an OpenAI field — see below. |
+
 **Request body:**
 ```json
 {
@@ -388,7 +399,8 @@ OpenAI-compatible chat completions. Accepts OpenAI SDK clients.
 {
   "id": "chatcmpl-...",
   "object": "chat.completion",
-  "model": "rustynail",
+  "created": 1770000000,
+  "model": "claude-3-5-sonnet-20241022",
   "choices": [
     {
       "index": 0,
@@ -396,7 +408,8 @@ OpenAI-compatible chat completions. Accepts OpenAI SDK clients.
       "finish_reason": "stop"
     }
   ],
-  "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
+  "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+  "cost": {"amount_usd": 0.00015, "micro_usd": 150, "currency": "USD"}
 }
 ```
 
@@ -409,6 +422,121 @@ data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"delta":
 
 data: [DONE]
 ```
+
+The SSE body is currently assembled in full before the response is written, so it
+is a valid event stream but not incrementally delivered.
+
+#### Stateless mode
+
+`"stateless": true` runs the completion with **no conversation state**: no history
+is read, none is written, and no per-user agent is created. Two calls with the
+same `user` are fully independent.
+
+Use it when independent requests must not contaminate each other — for example
+when a caller decomposes a problem into sub-problems and treats agreement between
+sibling sub-answers as a signal. If the siblings shared a conversation history,
+each would see its predecessors' answers and agree for the wrong reason.
+
+Differences from the default stateful path:
+
+| | Stateful (default) | `stateless: true` |
+|---|---|---|
+| Conversation memory | read and written | untouched |
+| System prompt | RustyNail's persona + skills context | **only what you send** |
+| Tools | available (ReAct loop) | never attached |
+| `usage` / `cost` | always absent (see below) | present when the provider reports counts |
+| `stream: true` | supported | refused |
+
+Tools are excluded deliberately: a ReAct loop makes several provider calls and
+discards each response's metadata, so token counts — and therefore cost — would be
+unrecoverable.
+
+#### Usage and cost
+
+Both objects are **omitted entirely when the provider did not report the
+underlying numbers**. They are never estimated.
+
+- `usage` is present only when the upstream provider returned token counts. The
+  stateful path routes through wrappers that do not preserve provider metadata,
+  so it never reports usage. Use `stateless: true` if you need metering.
+- `cost` is present only when `usage` is present *and* the resolved model has a
+  pricing entry. An unpriced model yields **no cost field** rather than a zero
+  one — a zero is indistinguishable from a free call, so a caller debiting a
+  ledger against it would under-count spend with no way to notice.
+
+`cost.micro_usd` is authoritative: integer micro-dollars, computed as
+`round(amount_usd × 1_000_000)` — **rounded to nearest, never truncated**. A
+caller converting from `amount_usd` itself must use the same rule; truncating
+desyncs a local debit from the real charge by up to one micro-unit per call,
+which accumulates silently over a long run.
+
+Providers differ in what they report. Anthropic, OpenAI, LiteLLM and
+openai-compatible return token counts on every call; Ollama returns them only
+when it has them; Gemini and Bedrock report counts but echo the *configured*
+model name rather than a provider-resolved one.
+
+#### Model resolution
+
+`model` in the response names the model that **actually ran** — taken from the
+provider's own response where the provider reports it — never the alias the
+caller asked for. Ask for `rustynail` and the response names the pinned version
+that served it.
+
+Accepted in a request:
+
+- the configured model name exactly
+- `rustynail`, `default`, `gateway` (case-insensitive), or an empty string —
+  "whatever this gateway serves"
+- a prefix of the configured name, so `claude-3-5-sonnet` is servable by
+  `claude-3-5-sonnet-20241022`
+
+Any other model name is **refused** with `model_not_available`. Silently serving
+Claude for a `gpt-4` request would make the response's `model` field untrue, and
+a caller replaying against that record would replay against the wrong model.
+
+#### Errors
+
+Error bodies carry a stable machine-readable `code`. Classify on `code`, never by
+parsing `message` — `message` is for humans and may change.
+
+```json
+{"error": {"code": "model_not_available", "message": "...", "type": "invalid_request_error"}}
+```
+
+| Code | Status | Cause | Retryable |
+|------|--------|-------|-----------|
+| `no_messages` | 400 | `messages` empty or all entries blank | no |
+| `model_not_available` | 400 | requested model is not served here | no |
+| `invalid_max_tokens` | 400 | `max_tokens` not a positive integer | no |
+| `upstream_provider_error` | 502 | the LLM provider failed or is unreachable | yes |
+
+Each code maps to exactly one cause, and no status is shared between a
+request-shape error and a transport fault — a caller that cannot tell them apart
+either retries a malformed request forever or gives up on a transient fault.
+
+#### Using this endpoint as a metered provider
+
+This endpoint is designed to serve as the single upstream for a client that
+meters its own spend and holds no provider credentials of its own — the gateway
+is the chokepoint, and its provider config, retry/fallback chain and metering
+apply to every call.
+
+Such a client should:
+
+1. POST to `http://localhost:<http_port>/v1/chat/completions` with
+   `"stateless": true`.
+2. Send a pinned, explicitly versioned `model`, not an alias — replay needs a
+   name that resolves to one thing.
+3. Read `cost.micro_usd` for ledger debits, falling back to a pre-call estimate
+   only when the field is absent, and recording that it did so.
+4. Classify failures on `error.code`.
+5. Include the bearer token when one is configured — `/v1` sits behind auth
+   (only `/live` and `/ready` are exempt), so a localhost subprocess needs the
+   token in its environment.
+
+The wire contract is pinned by `tests/quarry_provider_contract.rs`, which serves
+the real router on a real socket against `llm_provider: stub` — no credentials,
+no egress.
 
 ---
 

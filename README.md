@@ -66,7 +66,7 @@ calculator · web search (Tavily) · web fetch · filesystem · PDF analysis · 
 - **Admin API**: clear user memory, reload skills, inspect channel health
 - **Cron scheduler**: fire synthetic messages on configurable intervals
 - **Agent skills**: inject SKILL.md context files into agent system prompts
-- **OpenAI-compatible endpoint**: `POST /v1/chat/completions` (non-streaming + SSE)
+- **OpenAI-compatible endpoint**: `POST /v1/chat/completions` (non-streaming + SSE), with a `stateless` mode that reports real provider token counts and cost
 - **Prometheus metrics** + **OpenTelemetry tracing** + **Grafana dashboard config**
 - **Web dashboard** with WebSocket live updates
 - **SIGHUP hot-reload**: update log level, API token, rate limits, audit config without restart
@@ -221,7 +221,7 @@ See [docs/architecture.md](docs/architecture.md) for a deep-dive into the messag
 ```bash
 cargo build           # Debug build
 cargo build --release # Release build
-cargo test            # Run all 138+ tests
+cargo test            # Run all 200 tests
 cargo test -- --nocapture  # With output
 cargo clippy          # Lint
 cargo fmt             # Format
