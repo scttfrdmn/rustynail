@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Created the missing `v0.7.0` milestone and closed the `v0.14.0` milestone, which had no open issues but was still marked open.
 
 ### Changed
+- Documented that the project stays on `0.x.x` until further notice: `1.0.0` is not a target and the `v1.0.0` milestone is a bucket for API-stability-gated work, not a timeline. `CLAUDE.md` versioning section and milestone table updated; `README.md` states the API and config format may change in any minor release.
 - `CLAUDE.md` documents a 10-step release checklist and states that a version bump is not a release. Records the three drifts that motivated it: v0.14.0 bumped but never tagged (#94), v0.5.0–v0.7.0 tagged with no release, and the MSRV-broken images from v0.9.0 to v0.14.0. Adds a section on the agenkit path-dependency pin — both workflows must pin the same release tag, never a branch — and notes that the agenkit crate version does not track its repo tags. Also documents that the published image tag has no `v` prefix and is amd64-only.
 
 ## [0.15.0] - 2026-08-03

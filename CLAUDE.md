@@ -238,8 +238,9 @@ and Docker builds failed on an MSRV too low for the locked dependencies).
 | v0.13.0 | Integration Testing & Operational Maturity — rate limiter/agent/HotConfig/admin API/Teams/pipeline tests, config validate, admin audit logging | Closed (released 2026-03-18) |
 | v0.14.0 | Deployment & User Documentation — README overhaul, docs/ reference directory (configuration, deployment, channels, CLI, API, architecture, troubleshooting) | Milestone closed; never tagged — shipped inside v0.15.0 (#94). No `v0.14.0` tag or release exists, by design |
 | v0.15.0 | Build & Supply Chain Correctness — shell allowlist hardening, working Docker build (MSRV 1.94), functional test harness, green CI, agenkit pinned to v0.87.0 | Closed (released 2026-08-03) |
-| v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
-| v1.1.0 | Post-1.0 Channel Expansion — Matrix, Signal/IRC/LINE/Viber/WeChat, social DMs | Open |
+| v0.16.0 | Release Process Enforcement & Correctness — pre-tag gating (#97), harness buffer isolation (#92), verify README claims (#93) | Open |
+| v1.0.0 | Deferred — work gated on a stable API. **Not a target**; the project stays on `0.x.x` until further notice | Open |
+| v1.1.0 | Deferred — channel expansion: Matrix, Signal/IRC/LINE/Viber/WeChat, social DMs | Open |
 
 ## Architecture Overview
 
@@ -343,6 +344,13 @@ Follow [semver.org](https://semver.org/spec/v2.0.0.html) strictly:
 - **PATCH** (`0.0.X`): backwards-compatible bug fixes only
 
 Pre-1.0: minor bumps (`0.X.0`) may include breaking changes.
+
+**This project stays on `0.x.x` until further notice.** Do not propose, plan or
+cut a `1.0.0` release, and do not treat the `v1.0.0` milestone as a target date
+— it is a bucket for work that is genuinely gated on a stable API, not a
+timeline. New work belongs in the next `0.x.0` milestone. Breaking changes are
+allowed in a minor bump and must be marked **BREAKING** in the CHANGELOG entry
+(see the shell allowlist change in `[0.15.0]` for the expected form).
 
 ### Changelog (Keep a Changelog 1.1.0)
 
