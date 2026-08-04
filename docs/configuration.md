@@ -389,7 +389,7 @@ memory:
 | `image_enabled` | `TOOLS_IMAGE_ENABLED` | `false` | Enable image analysis tool |
 | `shell.enabled` | — | `false` | Enable shell execution tool |
 | `shell.require_approval` | — | `true` | Require `approved=true` before executing |
-| `shell.allowed_commands` | — | `[]` (any) | Command prefix allowlist |
+| `shell.allowed_commands` | — | `[]` (any) | Allowlist of permitted commands, matched token-wise |
 
 ```yaml
 tools:
@@ -405,7 +405,35 @@ tools:
     allowed_commands:
       - "echo"
       - "ls"
+      - "git status"
 ```
+
+### How `shell.allowed_commands` is enforced
+
+Entries are matched **token-wise against the parsed argv**, not as raw string
+prefixes. An entry constrains the program and any leading subcommands it names,
+leaving later arguments free:
+
+| Entry | Permits | Rejects |
+|---|---|---|
+| `git` | `git status`, `git log --oneline` | `gitleaks detect` |
+| `git status` | `git status --short` | `git push` |
+
+A **non-empty allowlist also changes how commands run**: the command is exec'd
+directly instead of being passed to `sh -c`, so shell features are unavailable —
+pipes, redirection, command substitution, globbing, and `&&`/`;` chaining. Any
+command containing `; | & $ ` > <` or a newline is rejected with an error.
+Quotes still group arguments containing spaces (`git commit -m 'two words'`).
+
+With an **empty** allowlist the command is passed to `sh -c` unchanged and full
+shell semantics apply. That is the permissive default; it grants arbitrary
+execution to whatever can call the tool, so pair it with `require_approval: true`.
+
+> **Note:** prior to v0.15.0 the allowlist prefix-matched the raw command string
+> and then ran it through `sh -c`, so an entry of `git` also permitted
+> `git status; rm -rf ~`. If you relied on shell syntax inside an allowlisted
+> command, it will now be rejected — split it into separate tool calls, or clear
+> the allowlist to opt back into full shell semantics.
 
 ## `skills.*`
 
