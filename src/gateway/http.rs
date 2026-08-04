@@ -6,7 +6,7 @@ use crate::channels::slack::{
 use crate::channels::sms::parse_sms_webhook;
 use crate::channels::teams::{parse_activity, verify_teams_signature, TeamsActivity};
 use crate::channels::telegram::{parse_update, TelegramUpdate};
-use crate::channels::testchan::TestChannel;
+use crate::channels::testchan::{CapturedMessages, TestChannel};
 use crate::channels::webchat::{WebchatSessions, WIDGET_JS};
 use crate::channels::webhook::{parse_webhook_body, verify_webhook_signature};
 use crate::channels::whatsapp::{parse_webhook, WebhookBody};
@@ -14,25 +14,24 @@ use crate::channels::Channel;
 use crate::config::{SkillsConfig, WebhookEndpoint};
 use crate::cron::CronJobStatus;
 use crate::gateway::dashboard::{DashboardEvent, MessageStats};
-use crate::gateway::HotConfig;
 use crate::gateway::rate_limiter::RateLimiter;
 use crate::gateway::user_prefs::UserPreferences;
+use crate::gateway::HotConfig;
 use crate::skills::SkillRegistry;
 use crate::types::Message;
 use axum::{
     body::Bytes,
     error_handling::HandleErrorLayer,
+    extract::Request,
     extract::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
-    extract::Request,
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
-    BoxError,
-    Router,
+    BoxError, Router,
 };
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
@@ -77,9 +76,13 @@ pub struct HttpServerConfig {
     /// When `Some(token)`, all API routes (except /live, /ready) require
     /// `Authorization: Bearer <token>`.
     pub api_token: Option<String>,
-    /// When `Some`, the `/test/send` and `/test/responses` endpoints are active
-    /// and backed by this `TestChannel` handle.
-    pub test_channel: Option<Arc<TestChannel>>,
+    /// When `Some`, the `/test/send` and `/test/responses` endpoints are active.
+    /// This is a handle to the *same* buffer the registered `TestChannel` writes
+    /// its captured responses into.
+    pub test_channel: Option<CapturedMessages>,
+    /// Sender used by `POST /test/send` to inject messages into the gateway
+    /// pipeline. Present whenever `test_channel` is set.
+    pub test_tx: Option<mpsc::UnboundedSender<Message>>,
     /// Per-user rate limiter (shared with gateway message loop).
     pub rate_limiter: Arc<RateLimiter>,
     /// Structured audit logger (None when audit is disabled).
@@ -117,7 +120,8 @@ pub struct AppState {
     pub stats: Arc<MessageStats>,
     pub dashboard_expected_auth: Option<String>,
     pub api_token: Option<String>,
-    pub test_channel: Option<Arc<TestChannel>>,
+    pub test_channel: Option<CapturedMessages>,
+    pub test_tx: Option<mpsc::UnboundedSender<Message>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub audit: Option<Arc<AuditLogger>>,
     pub hot_config: Arc<RwLock<HotConfig>>,
@@ -584,7 +588,10 @@ async fn generic_webhook_receive(
 async fn webchat_widget_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         WIDGET_JS,
     )
 }
@@ -784,31 +791,20 @@ struct TestSendRequest {
     content: String,
 }
 
+/// Inject a message into the gateway pipeline as if it arrived from a real
+/// channel. The agent's reply is captured by the `TestChannel` and retrieved
+/// via `GET /test/responses`.
 async fn test_send_handler(
     State(state): State<AppState>,
     Json(body): Json<TestSendRequest>,
 ) -> impl IntoResponse {
-    let tx = match &state.teams_tx.as_ref().or(
-        // We reuse the test_channel for routing — find the testchan sender via message_tx path
-        // The test channel inject is handled via the general message_tx stored in state
-        None.as_ref(),
-    ) {
-        _ => &None::<mpsc::UnboundedSender<Message>>,
+    let tx = match state.test_tx.as_ref() {
+        Some(tx) => tx,
+        None => {
+            return (StatusCode::NOT_FOUND, "test channel not enabled").into_response();
+        }
     };
-    let _ = tx; // handled below via test_channel directly
 
-    // Inject via the testchan — but we need a message_tx here.
-    // For test injection, we push directly through a dedicated sender if available.
-    // We expose a test_message_tx on AppState for this purpose.
-    if state.test_channel.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            "test channel not enabled",
-        )
-            .into_response();
-    }
-
-    // Test injection: create a message and send via test_message_tx
     let msg = Message::new(
         "testchan-main".to_string(),
         body.user_id,
@@ -816,25 +812,27 @@ async fn test_send_handler(
         body.content,
     );
 
-    // Store in the channel's captured list — responses come back via send_message
-    // For actual routing, we need the gateway's message_tx.
-    // This is wired up in gateway/mod.rs via test_message_tx.
-    if let Some(ref _tc) = state.test_channel {
-        // The gateway wires a dedicated sender for test injection
-        // For now, return 200 to indicate the endpoint is available
-        return (StatusCode::OK, Json(serde_json::json!({"status": "queued", "message": format!("{:?}", msg.content)}))).into_response();
+    if let Err(e) = tx.send(msg) {
+        warn!("Failed to enqueue test message: {}", e);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway not accepting messages",
+        )
+            .into_response();
     }
 
-    StatusCode::OK.into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "queued"})),
+    )
+        .into_response()
 }
 
-async fn test_responses_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn test_responses_handler(State(state): State<AppState>) -> impl IntoResponse {
     match &state.test_channel {
         None => (StatusCode::NOT_FOUND, "test channel not enabled").into_response(),
-        Some(tc) => {
-            let responses = tc.drain_responses().await;
+        Some(captured) => {
+            let responses = TestChannel::drain_captured(captured).await;
             let json: Vec<serde_json::Value> = responses
                 .iter()
                 .map(|m| {
@@ -1029,8 +1027,12 @@ async fn cron_jobs_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
-pub fn create_router(state: AppState, max_body_bytes: usize, request_timeout_seconds: u64) -> Router {
-    let router = Router::new()
+pub fn create_router(
+    state: AppState,
+    max_body_bytes: usize,
+    request_timeout_seconds: u64,
+) -> Router {
+    Router::new()
         // Health / observability
         .route("/health", get(health_handler))
         .route("/status", get(status_handler))
@@ -1098,12 +1100,12 @@ pub fn create_router(state: AppState, max_body_bytes: usize, request_timeout_sec
                 .layer(HandleErrorLayer::new(|_: BoxError| async {
                     StatusCode::REQUEST_TIMEOUT
                 }))
-                .layer(TimeoutLayer::new(Duration::from_secs(request_timeout_seconds))),
+                .layer(TimeoutLayer::new(Duration::from_secs(
+                    request_timeout_seconds,
+                ))),
         )
         .layer(DefaultBodyLimit::max(max_body_bytes))
-        .with_state(state);
-
-    router
+        .with_state(state)
 }
 
 pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
@@ -1132,6 +1134,7 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
         dashboard_expected_auth: cfg.dashboard_expected_auth,
         api_token: cfg.api_token,
         test_channel: cfg.test_channel,
+        test_tx: cfg.test_tx,
         rate_limiter: cfg.rate_limiter,
         audit: cfg.audit,
         hot_config: cfg.hot_config,
@@ -1153,9 +1156,18 @@ pub async fn start_http_server(cfg: HttpServerConfig) -> anyhow::Result<()> {
     info!("  Live:       http://localhost:{}/live", cfg.port);
     info!("  Dashboard:  http://localhost:{}/dashboard", cfg.port);
     info!("  Dash WS:    ws://localhost:{}/dashboard/ws", cfg.port);
-    info!("  Webchat:    ws://localhost:{}/channels/webchat/ws", cfg.port);
-    info!("  Widget JS:  http://localhost:{}/channels/webchat/widget.js", cfg.port);
-    info!("  Admin:      http://localhost:{}/admin/channels/health", cfg.port);
+    info!(
+        "  Webchat:    ws://localhost:{}/channels/webchat/ws",
+        cfg.port
+    );
+    info!(
+        "  Widget JS:  http://localhost:{}/channels/webchat/widget.js",
+        cfg.port
+    );
+    info!(
+        "  Admin:      http://localhost:{}/admin/channels/health",
+        cfg.port
+    );
     info!("  Cron jobs:  http://localhost:{}/cron/jobs", cfg.port);
 
     axum::serve(listener, app).await?;
@@ -1197,6 +1209,7 @@ mod tests {
             dashboard_expected_auth: None,
             api_token: None,
             test_channel: None,
+            test_tx: None,
             rate_limiter: RateLimiter::new(),
             audit: None,
             hot_config: Arc::new(RwLock::new(HotConfig {
