@@ -5,7 +5,11 @@
 # Compose: docker-compose.yml sets context: .. and dockerfile: rustynail/Dockerfile
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
-FROM rust:1.82-slim-bookworm AS builder
+# Toolchain must satisfy the highest MSRV in Cargo.lock. The AWS SDK crates
+# pulled in via agenkit's Bedrock adapter require 1.94.1; base64ct 1.8.3 is
+# edition 2024 (1.85) and wide 1.6.0 needs 1.89. Keep this in sync with
+# `rust-version` in Cargo.toml.
+FROM rust:1.94-slim-bookworm AS builder
 
 # Install C toolchain and OpenSSL dev headers (required by reqwest / openssl-sys)
 RUN apt-get update && apt-get install -y --no-install-recommends \

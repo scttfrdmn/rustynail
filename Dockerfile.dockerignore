@@ -1,0 +1,18 @@
+# Build context is the PARENT of rustynail/ (so the agenkit path dep resolves),
+# which means rustynail/.dockerignore is not consulted — Docker reads this file
+# instead because it sits beside the Dockerfile named in `-f`.
+#
+# Without it, a local `docker build ..` sweeps in every sibling project in the
+# parent directory (tens of GB). Allowlist only what the build needs.
+*
+
+!rustynail/
+!agenkit/
+
+# Re-exclude heavy or irrelevant subtrees from the two allowed dirs
+**/target/
+**/.git/
+**/node_modules/
+rustynail/diary/
+.env
+.env.*
