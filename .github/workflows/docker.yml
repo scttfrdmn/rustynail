@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  # Validate the image build before tagging, not after. Every tag from v0.9.0
+  # to v0.14.0 produced a broken image and nobody knew, because this workflow
+  # only ever ran once the release was already cut.
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Dockerfile.dockerignore"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docker.yml"
 
 env:
   REGISTRY: ghcr.io
@@ -15,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # `permissions` cannot take expressions, so this is static. Only tag
+      # builds actually publish — the login and push steps below are gated on
+      # the event being a tag push.
       packages: write
 
     steps:
@@ -33,6 +48,7 @@ jobs:
           path: agenkit
 
       - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -48,6 +64,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+            # Guarantees a non-empty tag list on pull requests, where the
+            # semver patterns do not match. Never pushed.
+            type=ref,event=pr
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -57,8 +76,26 @@ jobs:
         with:
           context: .
           file: rustynail/Dockerfile
-          push: true
+          # Pull requests build only — they verify the image still compiles
+          # without publishing anything.
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # A successful build is not a working image — v0.9.0 through v0.14.0
+      # taught that the job exit code says nothing about the artifact.
+      - name: Smoke test the built image
+        if: github.event_name == 'pull_request'
+        run: |
+          tag="$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -1)"
+          echo "Running: $tag version"
+          out="$(docker run --rm "$tag" version)"
+          echo "$out"
+          expected="$(grep -m1 '^version = ' rustynail/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if ! printf '%s\n' "$out" | grep -q "rustynail $expected"; then
+            echo "image did not report version $expected" >&2
+            exit 1
+          fi

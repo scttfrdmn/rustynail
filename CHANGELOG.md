@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `scripts/check-release-consistency.sh` — release consistency gate. Verifies the version in `Cargo.toml` agrees with `Cargo.lock`, `CHANGELOG.md`, `README.md`, `CLAUDE.md` and the Helm chart (`version` and `appVersion`); that the CHANGELOG uses only the six Keep a Changelog headers and has a comparison link; that the Dockerfile builder image matches the declared MSRV; and that both workflows pin agenkit to the same release tag rather than a branch. With `--release` it additionally requires that the tag exists and is an ancestor of `origin/main`, that a GitHub release exists, that no `v*` tag lacks a release, and that the milestone exists and is closed with no open issues. Verified against each historical failure it is meant to catch.
+- `msrv` CI job — builds with `cargo check --locked --all-targets` at the `rust-version` declared in `Cargo.toml` instead of `stable`. Closes #91. Every tag from v0.9.0 to v0.14.0 produced an unusable image because the builder MSRV was below what the lockfile required; `stable` in CI could not detect that, so only tag-time Docker builds failed and those logs went unread.
+- `.github/workflows/release-consistency.yml` — runs the gate in `--release` mode on every `v*` tag, so tag/release/milestone drift surfaces as a failed check instead of going unnoticed for months.
+- `Release consistency` step in the main CI job, gating version coherence on every push and pull request.
+- `docker.yml` now also runs on pull requests touching `Dockerfile`, `Cargo.toml`, `Cargo.lock`, the dockerignore files, or the workflow itself. It builds without publishing (login and push are gated on tag pushes) and smoke-tests the result by running `version` in the built image and asserting it reports the version in `Cargo.toml`. Image builds are validated before a tag is cut rather than after.
+
+### Fixed
+- Backfilled the missing GitHub releases for `v0.5.0`, `v0.6.0` and `v0.7.0`. All three were tagged on 2026-03-18 but never released; they are now published from their original CHANGELOG entries and marked as retroactive.
+- Created the missing `v0.7.0` milestone and closed the `v0.14.0` milestone, which had no open issues but was still marked open.
+
+### Changed
+- `CLAUDE.md` documents a 10-step release checklist and states that a version bump is not a release. Records the three drifts that motivated it: v0.14.0 bumped but never tagged (#94), v0.5.0–v0.7.0 tagged with no release, and the MSRV-broken images from v0.9.0 to v0.14.0. Adds a section on the agenkit path-dependency pin — both workflows must pin the same release tag, never a branch — and notes that the agenkit crate version does not track its repo tags. Also documents that the published image tag has no `v` prefix and is amd64-only.
+
 ## [0.15.0] - 2026-08-03
 
 Includes the documentation work originally logged under `[0.14.0]`, which was
