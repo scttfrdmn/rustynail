@@ -270,6 +270,9 @@ Follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Pre-1.
 
 Current version: **0.15.0 (Beta)**
 
+RustyNail stays on `0.x.x` until further notice. There is no 1.0 timeline; treat
+the API and configuration format as subject to change in any minor release.
+
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## License
