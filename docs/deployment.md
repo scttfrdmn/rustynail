@@ -78,7 +78,7 @@ Then set `MEMORY_BACKEND=redis` and `REDIS_URL=redis://redis:6379`.
 ```bash
 helm install rustynail ./deploy/helm/rustynail \
   --set secrets.anthropicApiKey=sk-ant-... \
-  --set image.tag=0.13.0
+  --set image.tag=0.15.0
 ```
 
 ### Key `values.yaml` overrides
@@ -87,7 +87,7 @@ helm install rustynail ./deploy/helm/rustynail \
 # Image
 image:
   repository: ghcr.io/scttfrdmn/rustynail
-  tag: "0.13.0"
+  tag: "0.15.0"
   pullPolicy: IfNotPresent
 
 # Replicas and autoscaling
@@ -141,7 +141,7 @@ memory:
 
 ```bash
 helm upgrade rustynail ./deploy/helm/rustynail \
-  --set image.tag=0.14.0 \
+  --set image.tag=0.15.0 \
   --reuse-values
 ```
 

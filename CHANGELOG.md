@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-03
+
+Includes the documentation work originally logged under `[0.14.0]`, which was
+never tagged or released. See the note under that heading.
+
+### Security
+- The shell tool allowlist no longer prefix-matches the raw command string. `src/tools/shell.rs` checked `command.starts_with(prefix)` and then passed the whole string to `sh -c`, so an allowlist entry of `git` also permitted `git status; rm -rf ~` — the allowlist read as a boundary but did not bound execution. Entries are now tokenized and matched element-wise against the parsed argv, and an allowlisted command is exec'd directly instead of through a shell.
+
+### Fixed
+- Test channel (`POST /test/send`) now injects messages into the gateway pipeline instead of returning a bare `200` with no side effect; replies are captured and retrievable from `GET /test/responses`. The zero-credential harness was previously non-functional end to end.
+- Gateway no longer constructs three separate `TestChannel` instances with independent capture buffers. It builds one channel and hands the HTTP layer a `CapturedMessages` handle to the same buffer.
+- Docker builds now succeed. The builder image was `rust:1.75`, below the MSRV of several locked dependencies (`aws-credential-types` 1.3.0 requires 1.94.1, `wide` 1.6.0 requires 1.89, `base64ct` 1.8.3 is edition 2024). Builder image and the new `rust-version` field are both pinned to 1.94.
+- `tests/harness/harness_test.rs` was never compiled because it lives outside `tests/` root and had no `[[test]]` target. It is now registered, serialized against the process-wide response buffer, and polls for responses rather than reading once.
+- CI is green again. Every run since v0.9.0 failed at `cargo fmt --check`, so `cargo clippy -- -D warnings` and `cargo test` never executed upstream. Formatting is applied across the tree and all clippy findings are resolved: `derivable_impls` (`AuditConfig`), `let_and_return` (`create_router`), three `manual_div_ceil` sites, `type_complexity` (new `RingBuffer` alias), `await_holding_lock` (harness lock is now `tokio::sync::Mutex`), and unused imports / dead code in the test helpers.
+
+### Added
+- `rust-version = "1.94"` in `Cargo.toml`, documenting the MSRV and keeping it in sync with the Dockerfile builder image.
+- `Dockerfile.dockerignore` — the build context is the parent directory (required for the agenkit path dependency), so an allowlist prevents sibling projects from being swept into the context.
+- `CapturedMessages` type alias and `TestChannel::captured_handle()` / `drain_captured()` in `src/channels/testchan.rs`.
+
+### Changed
+- **BREAKING (shell tool allowlist):** a non-empty `tools.shell.allowed_commands` now disables shell syntax. Commands containing `;`, `|`, `&`, `$`, `` ` ``, `>`, `<`, or a newline are rejected, and the command is exec'd directly rather than via `sh -c` — so pipes, redirection, substitution, and globbing are unavailable. Quotes still group arguments. Matching is token-wise, so `git` permits `git log` but no longer `gitleaks`, and `git status` permits only that subcommand. Clear the allowlist to opt back into full shell semantics. Only affects deployments that configured an allowlist; the default is empty.
+- Both CI workflows pin `ref: v0.87.0` when checking out agenkit instead of tracking the default branch. A path dependency carries no version constraint, so an upstream push previously changed what CI and release images built with no commit here.
+- `.env.example` refreshed from 13 lines (frozen at v0.1.0) to a complete, sectioned reference covering every environment variable read by `src/config/mod.rs`.
+- `README.md` prerequisites and badge updated to Rust 1.94+; added agenkit sibling-clone instructions, the pinned release tag, and directory layout.
+- `CLAUDE.md` documents the agenkit sibling-clone prerequisite, the pin-to-a-tag rule, the required directory layout, and the 1.94 minimum toolchain; the parity table now states that ✅ requires verification, not just shipped code.
+- `docs/configuration.md` documents how `shell.allowed_commands` is enforced, with a migration note for the behaviour change.
+
+### Removed
+- Dead `config: TeamsConfig` field from `TeamsChannel` (the only build warning); only the auth credentials are needed past construction.
+- Unused `make_test_config` helper from `tests/common/mod.rs` and the unreachable `AlwaysFailAgent` from `src/agents/manager.rs` (it could not be injected into `AgentManager`).
+
 ## [0.14.0] - 2026-03-18
+
+> Logged as released on 2026-03-18 but never tagged, and no image was published.
+> The Docker build could not have succeeded at this point — the builder image
+> was below the MSRV of the locked dependencies. Shipped as part of `0.15.0`.
 
 ### Added
 - `docs/configuration.md`: complete field-by-field configuration reference for all 11 top-level config sections (`gateway`, `channels`, `agents`, `memory`, `tools`, `skills`, `audit`, `cron`, `mcp`, `otel`, `dashboard`); includes env var table, YAML examples, and per-backend subsections
@@ -291,8 +327,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured logging with `tracing` and `tracing-subscriber`
 - README with architecture diagrams, quick start, and HTTP endpoint documentation
 
-[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.14.0...HEAD
-[0.14.0]: https://github.com/scttfrdmn/rustynail/compare/v0.13.0...v0.14.0
+[Unreleased]: https://github.com/scttfrdmn/rustynail/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/scttfrdmn/rustynail/compare/v0.13.0...v0.15.0
+[0.14.0]: https://github.com/scttfrdmn/rustynail/compare/v0.13.0...v0.15.0
 [0.13.0]: https://github.com/scttfrdmn/rustynail/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/rustynail/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/rustynail/compare/v0.10.0...v0.11.0

@@ -2,8 +2,8 @@
 
 **"Rust Never Sleeps!"**
 
-[![Version](https://img.shields.io/badge/version-0.13.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.13.0)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
+[![Version](https://img.shields.io/badge/version-0.15.0-blue)](https://github.com/scttfrdmn/rustynail/releases/tag/v0.15.0)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/scttfrdmn/rustynail)
 [![CI](https://github.com/scttfrdmn/rustynail/actions/workflows/ci.yml/badge.svg)](https://github.com/scttfrdmn/rustynail/actions/workflows/ci.yml)
@@ -75,26 +75,39 @@ calculator · web search (Tavily) · web fetch · filesystem · PDF analysis · 
 
 ## Quick Start
 
-**Prerequisites:** Rust 1.75+, an Anthropic API key (or other provider).
+**Prerequisites:** Rust 1.94+, an Anthropic API key (or other provider).
+
+RustyNail depends on [agenkit](https://github.com/scttfrdmn/agenkit) as a local
+path dependency at `../agenkit/agenkit-rust`, so it must be cloned as a sibling
+directory. Without it `cargo build` fails immediately.
 
 ```bash
-# 1. Clone and build
+# 1. Clone both repos side by side, pinning agenkit to the tested release
+git clone https://github.com/scttfrdmn/agenkit.git
+git -C agenkit checkout v0.87.0
 git clone https://github.com/scttfrdmn/rustynail.git
+
+# Layout must be:
+#   parent/
+#   ├── agenkit/agenkit-rust/
+#   └── rustynail/
+
+# 2. Build
 cd rustynail
 cargo build --release
 
-# 2. Set the required environment variable
+# 3. Set the required environment variable
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# 3. Start (env-vars only — no channels except test channel)
+# 4. Start (env-vars only — no channels except test channel)
 ./target/release/rustynail
 
-# 4. Or start with a config file
+# 5. Or start with a config file
 CONFIG_FILE=config.yaml ./target/release/rustynail
 
-# 5. Verify
+# 6. Verify
 curl http://localhost:8080/health
-# {"status":"ok","version":"0.13.0"}
+# {"status":"ok","version":"0.15.0"}
 ```
 
 **Minimal `config.yaml`:**
@@ -255,7 +268,7 @@ Contributions are welcome. Please open an issue or submit a pull request.
 
 Follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Pre-1.0 minor bumps (`0.X.0`) may include breaking changes.
 
-Current version: **0.13.0 (Beta)**
+Current version: **0.15.0 (Beta)**
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 

@@ -80,7 +80,7 @@ rustynail status --port 9090
 ```json
 {
   "status": "running",
-  "version": "0.13.0",
+  "version": "0.15.0",
   "uptime_seconds": 3600,
   "channels": [
     {"name": "discord-main", "status": "healthy"}
@@ -102,7 +102,7 @@ rustynail version
 **Output:**
 
 ```
-rustynail 0.13.0
+rustynail 0.15.0
 repository: https://github.com/scttfrdmn/rustynail
 license:    Apache-2.0
 ```
