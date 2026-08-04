@@ -23,10 +23,13 @@ jobs:
         with:
           path: rustynail
 
+      # Keep this ref in sync with ci.yml — the released image must be built
+      # against the same agenkit revision CI validated.
       - name: Checkout agenkit (sibling)
         uses: actions/checkout@v4
         with:
           repository: scttfrdmn/agenkit
+          ref: v0.87.0
           path: agenkit
 
       - name: Log in to GitHub Container Registry

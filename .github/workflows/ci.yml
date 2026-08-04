@@ -20,10 +20,14 @@ jobs:
         with:
           path: rustynail
 
+      # Pinned to a release tag rather than the default branch: agenkit is a
+      # path dependency, so Cargo cannot constrain its version and an upstream
+      # push would otherwise change what CI builds without a commit here.
       - name: Checkout agenkit (sibling)
         uses: actions/checkout@v4
         with:
           repository: scttfrdmn/agenkit
+          ref: v0.87.0
           path: agenkit
 
       - name: Install Rust toolchain
