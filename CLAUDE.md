@@ -236,7 +236,7 @@ and Docker builds failed on an MSRV too low for the locked dependencies).
 | v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
 | v0.12.0 | Streaming & Memory Intelligence — Teams HMAC, vector decay, token compaction, WS streaming, OpenAI SSE | Closed (released 2026-03-18) |
 | v0.13.0 | Integration Testing & Operational Maturity — rate limiter/agent/HotConfig/admin API/Teams/pipeline tests, config validate, admin audit logging | Closed (released 2026-03-18) |
-| v0.14.0 | Deployment & User Documentation — README overhaul, docs/ reference directory (configuration, deployment, channels, CLI, API, architecture, troubleshooting) | Never tagged; shipped as part of v0.15.0 (#94) |
+| v0.14.0 | Deployment & User Documentation — README overhaul, docs/ reference directory (configuration, deployment, channels, CLI, API, architecture, troubleshooting) | Milestone closed; never tagged — shipped inside v0.15.0 (#94). No `v0.14.0` tag or release exists, by design |
 | v0.15.0 | Build & Supply Chain Correctness — shell allowlist hardening, working Docker build (MSRV 1.94), functional test harness, green CI, agenkit pinned to v0.87.0 | Closed (released 2026-08-03) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
 | v1.1.0 | Post-1.0 Channel Expansion — Matrix, Signal/IRC/LINE/Viber/WeChat, social DMs | Open |
@@ -360,6 +360,60 @@ Follow [keepachangelog.com](https://keepachangelog.com/en/1.1.0/) strictly:
   - `### Security` — security vulnerability fixes
 - **Never use**: `### Planned`, `### Technical Specifications`, `### Documentation`, or any other custom headers
 - Do NOT list planned future work in `[Unreleased]` — that belongs in GitHub issues
+
+### Releasing — a version is not released until every artifact agrees
+
+A version bump is not a release. Three separate drifts got this far unnoticed
+because each step was manual and nothing verified the result:
+
+- **v0.14.0** had a version bump, a CHANGELOG entry, and a closed milestone —
+  but no tag and no release (#94). The version existed only in files.
+- **v0.5.0, v0.6.0, v0.7.0** were tagged but had no GitHub release for four
+  months, and v0.7.0 had no milestone at all.
+- **Every tag from v0.9.0 to v0.14.0** produced no usable image: the Dockerfile
+  builder MSRV was below what `Cargo.lock` required. CI used `stable`, so only
+  tag builds broke — and nobody read those logs.
+
+**Run the gate before tagging. It is not optional:**
+
+```bash
+scripts/check-release-consistency.sh            # version coherence (also runs in CI)
+scripts/check-release-consistency.sh --release  # + tag, release, milestone
+```
+
+Release checklist — every box, in this order:
+
+1. `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD`; add a fresh empty `[Unreleased]`
+2. Add the `[X.Y.Z]:` comparison link at the bottom and repoint `[Unreleased]`
+3. Bump the version in **all six**: `Cargo.toml`, `Cargo.lock` (via
+   `cargo update -p rustynail`), `README.md`, `CLAUDE.md`, `Chart.yaml`
+   (`version` **and** `appVersion`), and any `docs/*.md` sample output
+4. `scripts/check-release-consistency.sh` — must exit 0
+5. Merge to `main` and **wait for CI to go green on the merge commit**, not just
+   on the PR
+6. `git tag -a vX.Y.Z -m "…"` and `git push origin vX.Y.Z`
+7. `gh release create vX.Y.Z --notes-file …` — a tag alone is not a release
+8. Close the milestone; create it first if it does not exist
+9. `scripts/check-release-consistency.sh --release` — must exit 0
+10. Confirm `docker.yml` succeeded **and pull the image** to verify it runs.
+    Note the published tag has no `v` prefix (`ghcr.io/scttfrdmn/rustynail:X.Y.Z`),
+    and the image is amd64-only — on arm64 pass `--platform linux/amd64`
+
+Never mark a release done on the strength of a green checkmark alone. Job
+success means the step exited 0, not that the artifact works — pull it and run
+it.
+
+### agenkit dependency pin
+
+agenkit is a **path dependency**, so Cargo cannot constrain its version. The
+`ref:` in the workflows is the only pin that exists. Both `ci.yml` and
+`docker.yml` must pin the **same release tag** — never a branch — or an
+upstream push silently changes what CI validates and what the release image
+contains. The consistency gate enforces this.
+
+Note the agenkit crate version does not track its repo tags (the crate reads
+`0.83.0` at tag `v0.87.0`, since tags span a polyglot repo). The tag is the
+only usable pin point.
 
 ### Commit Convention (Conventional Commits)
 

@@ -59,3 +59,62 @@ jobs:
         run: cargo test
         env:
           ANTHROPIC_API_KEY: test_unused
+
+      # Catches version drift between Cargo.toml, Cargo.lock, CHANGELOG,
+      # README, CLAUDE.md and the Helm chart, plus MSRV/Dockerfile and agenkit
+      # pin mismatches. Release-only checks (tag, GitHub release, milestone)
+      # run in the release-consistency workflow, which has network access.
+      - name: Release consistency
+        working-directory: rustynail
+        run: ./scripts/check-release-consistency.sh
+
+  # The Dockerfile builder image MSRV drifted below what the lockfile required
+  # and no tag produced a usable image from v0.9.0 to v0.14.0. `stable` in the
+  # job above cannot catch that; this job builds at the declared MSRV.
+  msrv:
+    name: build at MSRV
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout rustynail
+        uses: actions/checkout@v4
+        with:
+          path: rustynail
+
+      - name: Checkout agenkit (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: scttfrdmn/agenkit
+          ref: v0.87.0
+          path: agenkit
+
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        working-directory: rustynail
+        run: |
+          v="$(grep -m1 '^rust-version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ -z "$v" ]; then
+            echo "Cargo.toml has no rust-version field" >&2
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rustynail/target
+          key: ${{ runner.os }}-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('rustynail/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-msrv-
+
+      - name: cargo check at MSRV
+        working-directory: rustynail
+        run: cargo check --locked --all-targets

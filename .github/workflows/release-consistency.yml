@@ -1,0 +1,42 @@
+# Verifies that a pushed tag actually corresponds to a coherent release.
+#
+# v0.14.0 was version-bumped and changelogged but never tagged (#94), and
+# v0.5.0/v0.6.0/v0.7.0 were tagged with no GitHub release for four months.
+# Nothing checked, so nothing noticed. This runs on every v* tag and fails
+# loudly when the artifacts disagree.
+#
+# It runs alongside docker.yml rather than gating it: the image build is
+# already in flight by the time a tag lands, so the point here is a visible
+# red X on the release, not prevention after the fact. Run
+# `scripts/check-release-consistency.sh --release` locally before tagging to
+# catch problems while they are still cheap to fix.
+name: Release consistency
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: verify tag, release, milestone
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history plus tags so the ancestor check against main works.
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch origin main:refs/remotes/origin/main
+
+      - name: Check release consistency
+        run: ./scripts/check-release-consistency.sh --release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
