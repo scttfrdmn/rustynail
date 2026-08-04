@@ -26,7 +26,7 @@ Basic health check for load balancers.
 
 **Response 200:**
 ```json
-{"status": "ok", "version": "0.13.0"}
+{"status": "ok", "version": "0.15.0"}
 ```
 
 ---
@@ -62,7 +62,7 @@ Detailed system status including channel health and active users.
 ```json
 {
   "status": "running",
-  "version": "0.13.0",
+  "version": "0.15.0",
   "uptime_seconds": 3600,
   "channels": [
     {"name": "discord-main", "status": "healthy", "detail": ""},
@@ -112,7 +112,7 @@ Dashboard JSON data endpoint.
 **Response 200:**
 ```json
 {
-  "version": "0.13.0",
+  "version": "0.15.0",
   "uptime_seconds": 3600,
   "messages_in": 1234,
   "messages_out": 1230,

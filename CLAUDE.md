@@ -3,13 +3,38 @@
 ## Project Overview
 
 - **Name**: RustyNail
-- **Version**: 0.12.0
+- **Version**: 0.15.0
 - **GitHub**: https://github.com/scttfrdmn/rustynail
 - **License**: Apache 2.0
 - **Description**: High-performance personal AI assistant built with Rust and Agenkit-Rust. Connects to messaging platforms (Discord, WhatsApp, Telegram, Slack) where users interact via chat.
 - **Sister Project**: [BuckTooth](https://github.com/scttfrdmn/bucktooth) (Go implementation)
 
 ## Build & Run Commands
+
+**Prerequisite:** agenkit is a local path dependency (`../agenkit/agenkit-rust`)
+and must be cloned as a sibling directory, or `cargo build` fails immediately:
+
+```bash
+git clone https://github.com/scttfrdmn/agenkit.git   # in the parent of rustynail/
+cd agenkit && git checkout v0.87.0                   # pin to the tested release
+```
+
+**Pin to a release tag, not `main`.** A path dependency carries no version
+constraint, so Cargo will happily build against whatever is checked out. Both
+CI workflows pin `ref: v0.87.0`; when bumping agenkit, update `ci.yml`,
+`docker.yml`, and this file together so local, CI, and release builds agree.
+
+Required layout — both CI workflows check out this same structure:
+
+```
+parent/
+├── agenkit/agenkit-rust/
+└── rustynail/
+```
+
+Minimum Rust toolchain is **1.94** (`rust-version` in Cargo.toml), set by the AWS
+SDK crates that agenkit's Bedrock adapter pulls in. Keep it in sync with the
+Dockerfile builder image.
 
 ```bash
 # Build (debug)
@@ -125,7 +150,7 @@ Before drafting a milestone plan:
 2. List each gap with the source project (`BuckTooth`, `OpenClaw`, or `Both`) and a short description.
 3. Assign gaps to the milestone or a future one, and create GitHub issues for each.
 
-### Parity status (as of v0.12.0)
+### Parity status (as of v0.15.0)
 
 | Feature area | BuckTooth | OpenClaw | Notes |
 |---|---|---|---|
@@ -166,7 +191,7 @@ Before drafting a milestone plan:
 | Docker / distroless image | ✅ | ✅ | |
 | CI/CD (GitHub Actions) | ✅ | ✅ | |
 | Criterion benchmarks | ✅ | — | BuckTooth has none |
-| Zero-credential test harness | ✅ | — | BuckTooth has none |
+| Zero-credential test harness | ✅ | — | BuckTooth has none. Verified working end-to-end as of 2026-08-03 |
 | Shell completion | ✅ | ✅ | |
 | PDF analysis tool | ✅ | — | |
 | Image analysis tool | ✅ | — | |
@@ -188,12 +213,17 @@ Before drafting a milestone plan:
 
 Update this table at the start of each milestone planning session.
 
+A ✅ means the feature exists **and has been verified to work**. Before marking a
+row ✅, exercise it — two rows in this table previously claimed parity for code
+that was shipped but non-functional (the test harness returned an empty buffer,
+and Docker builds failed on an MSRV too low for the locked dependencies).
+
 ## Milestones
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | v0.1.0 | Foundation — core types, Discord, Agenkit, HTTP | Closed (released 2026-02-01) |
-| v0.2.0 | Tools & Multi-Channel — tool registry, WhatsApp | Open |
+| v0.2.0 | Tools & Multi-Channel — tool registry, WhatsApp | Closed (released 2026-03-17) |
 | v0.3.0 | Platform Expansion — Telegram, Slack, OpenTelemetry | Closed (released 2026-03-17) |
 | v0.4.0 | Production Infrastructure — Docker, CI/CD, web dashboard | Closed (released 2026-03-17) |
 | v0.4.5 | Config flexibility + integration test suite | Closed (released 2026-03-18) |
@@ -206,8 +236,10 @@ Update this table at the start of each milestone planning session.
 | v0.11.0 | Message Quality & Resilience — chunking, deduplication, channel formatting, attachment routing, retry jitter, provider fallback | Closed (released 2026-03-18) |
 | v0.12.0 | Streaming & Memory Intelligence — Teams HMAC, vector decay, token compaction, WS streaming, OpenAI SSE | Closed (released 2026-03-18) |
 | v0.13.0 | Integration Testing & Operational Maturity — rate limiter/agent/HotConfig/admin API/Teams/pipeline tests, config validate, admin audit logging | Closed (released 2026-03-18) |
-| v0.14.0 | Deployment & User Documentation — README overhaul, docs/ reference directory (configuration, deployment, channels, CLI, API, architecture, troubleshooting) | Closed (released 2026-03-18) |
+| v0.14.0 | Deployment & User Documentation — README overhaul, docs/ reference directory (configuration, deployment, channels, CLI, API, architecture, troubleshooting) | Never tagged; shipped as part of v0.15.0 (#94) |
+| v0.15.0 | Build & Supply Chain Correctness — shell allowlist hardening, working Docker build (MSRV 1.94), functional test harness, green CI, agenkit pinned to v0.87.0 | Closed (released 2026-08-03) |
 | v1.0.0 | Production Ready — full hardening, docs, dashboard v2 | Open |
+| v1.1.0 | Post-1.0 Channel Expansion — Matrix, Signal/IRC/LINE/Viber/WeChat, social DMs | Open |
 
 ## Architecture Overview
 
