@@ -8,6 +8,8 @@
 //!
 //! - [`caps`] — parsing a sender's prose into quarry's `Caps`, or a question.
 //! - [`policy`] — what the sender is *allowed*, and the `Scope` their run carries.
+//! - [`approval`] — the plan gate: the sender approves in chat before any spend.
+//! - [`gate`] — sequencing a run behind its approval: ask, wait, then maybe spawn.
 //! - [`event`] — the `RunEvent` wire types and the NDJSON line parser.
 //! - [`supervisor`] — spawning, lifecycle, and outcome classification.
 //!
@@ -17,17 +19,32 @@
 //! have, and mints the scope that qualifies every cache key. Caps and scope reach a
 //! [`supervisor::RunRequest`] only after [`policy`] has clamped them. Letting the
 //! request be the policy is exactly the failure the split prevents.
+//!
+//! # And then the sender agrees, or nothing runs
+//!
+//! [`approval`] sits between the grant and the spawn. Policy decides the ceiling;
+//! the sender decides whether to spend under it. Both are required — an operator
+//! who permits $50 has not asked for $50 to be spent, and a sender who asks for
+//! $50 has not been permitted it.
 
+pub mod approval;
 pub mod caps;
 pub mod event;
+pub mod gate;
 pub mod policy;
 pub mod supervisor;
 
+pub use approval::{
+    classify_reply, render_cancelled, render_clarification, render_expired, render_plan,
+    render_superseded, ApprovalRegistry, ApprovedCaps, Decision, PlanDisclosure, Reply,
+    ReplyOutcome, Unavailable,
+};
 pub use caps::{
     parse_caps, usd_to_micro, CapsParse, CapsRefusal, Disclosure, Question, RequestedCaps,
     SenderTimezone, TimezoneSource, UNLIMITED_MICRO_USD,
 };
 pub use event::{RunEvent, RunRecordSummary, StreamStats};
+pub use gate::{run_gated, GateOutcome, Responder};
 pub use policy::{
     CapAdjustment, CapsPolicy, ConfigCapsPolicy, Denomination, Grant, OverLimit, PolicyRefusal,
     ScopeError, ScopeTags,
@@ -244,6 +261,7 @@ mod tests {
             // fail on a slow machine.
             run_timeout_seconds: 0,
             default_timezone: String::new(),
+            approval_timeout_seconds: 300,
             // These tests drive the supervisor with caps already clamped; policy
             // resolution has its own tests in `policy`.
             policy: crate::config::QuarryPolicyConfig::default(),
