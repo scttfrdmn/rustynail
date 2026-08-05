@@ -547,6 +547,7 @@ quarry:
   retention_max_age_seconds: 0
   run_timeout_seconds: 900
   default_timezone: America/New_York
+  approval_timeout_seconds: 300
   policy:
     default:
       allowed_denominations: [spend, due]
@@ -580,6 +581,7 @@ quarry:
 | `retention_max_age_seconds` | `QUARRY_RETENTION_MAX_AGE_SECONDS` | `0` | Delete run directories older than this. `0` disables |
 | `run_timeout_seconds` | `QUARRY_RUN_TIMEOUT_SECONDS` | `900` | Kill a run after this long. `0` disables |
 | `default_timezone` | `QUARRY_DEFAULT_TIMEZONE` | — | IANA zone deadlines resolve in when a sender has no stored preference. Empty = UTC |
+| `approval_timeout_seconds` | `QUARRY_APPROVAL_TIMEOUT_SECONDS` | `300` | How long a sender has to approve a plan. **Expiry cancels at zero spend.** Values below `15` are clamped up; `0` does **not** disable the gate |
 | `policy` | — (file only) | empty | Who may run quarry, with what caps, in what scope. **Empty means nobody may run.** See below |
 
 ### The child's environment is constructed, not inherited
@@ -814,6 +816,88 @@ bill, and refusals alone cannot answer it.
 flight keep the caps they started with, since those were handed to a child process
 and cannot be revised. An operator who had to restart the gateway to tighten a cap
 would not tighten it.
+
+### The plan gate: a human approves in chat, or nothing runs
+
+Being *allowed* to run under `policy` is not the same as running. Once the policy
+resolves a grant, the gateway sends the sender a plan message and **waits**. Only
+an explicit approval from that sender starts a quarry process.
+
+The message states the granted caps, any adjustment the policy made to what was
+asked for, and the expiry window:
+
+```
+**Before I spend anything — approve this run?**
+
+> how many moons does mars have
+
+**Limits in force**
+• Spend: at most $5.0000
+• Time: at most 30m
+
+quarry plans to fit these limits, so the spend limit is the most this can cost.
+
+**I had to change what you asked for**
+• you asked for spend $50.0000, policy allows $5.0000 — proceeding with $5.0000
+
+**No cost estimate:** quarry has no plan-only mode, so producing one would be a
+real planner call that itself spends.
+
+This offer expires in 5m, and expiring cancels it — I will not run anything
+unless you say so.
+Reply **yes / y / approve** to run it, or **no / n / cancel** to cancel.
+```
+
+The plan gates on **the cap, not on an estimate**. Under quarry's P4 the cap is
+the contract — quarry fits its plan to the cap rather than discovering the cost
+partway through — so the spend limit shown *is* the ceiling on the bill. No
+estimate appears because quarry has no plan-only mode upstream; the only planner
+entry point is a real call that spends, so producing an estimate would spend money
+to decide whether to spend money. That absence is **stated in the message** rather
+than rendered as `$0.00`, since a sender who reads a fabricated zero is
+approving against a measurement nobody took.
+
+#### Reply vocabulary
+
+Replies are matched **whole-word**, case-insensitively, after trimming and
+stripping trailing punctuation:
+
+| Meaning | Accepted |
+|---------|----------|
+| Approve | `yes` `y` `approve` `approved` `ok` `okay` `go` `run` |
+| Cancel | `no` `n` `cancel` `stop` `abort` `nope` `nevermind` |
+
+A **multi-word** reply is never scanned for a keyword. "yes, but cheaper" and
+"no, wait — yes" each contain an approve word and neither is an approval; both
+get a re-prompt that repeats the vocabulary, and the run keeps waiting. Only the exact
+forms above settle the gate.
+
+#### What cannot be configured
+
+- **Silence never approves.** There is no `default_approve` setting and no way to
+  write one. A timeout cancels, and cancelling records zero spend.
+- **`approval_timeout_seconds: 0` does not disable the gate.** It is clamped up to
+  15 seconds — a zero-second window would cancel every run before its plan
+  message finished sending, which reads as a broken integration rather than as a
+  policy.
+- **A bystander cannot approve.** The pending approval is keyed on
+  `(channel, sender)`, so a `yes` from anyone other than the sender who asked is
+  an ordinary message. Two senders in the same channel can each have a plan
+  outstanding without either being able to answer the other's.
+- **A second request supersedes the first.** The older plan is cancelled at zero
+  spend and the sender is told, rather than leaving two live gates keyed on
+  the same sender.
+
+Approval replies are exempt from message deduplication. A sender who approves two
+runs in a session sends the *same* one-word reply twice, and the dedup ring buffer
+would otherwise drop the second as a repeat — leaving that run to expire
+unapproved with nothing to explain why. The exemption is not a bypass: it applies
+only while that sender has a plan outstanding on that channel, and settling the
+approval clears it.
+
+Every decision is audited as `quarry_plan_decision` with the request id and the
+outcome (`approved`, `cancelled`, `expired`, `superseded`), correlating with the
+`quarry_policy_decision` and `quarry_run_started` records for the same run.
 
 ## `otel.*`
 

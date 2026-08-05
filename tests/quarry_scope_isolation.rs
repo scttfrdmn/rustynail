@@ -120,6 +120,7 @@ exit 0
             retention_max_age_seconds: 0,
             run_timeout_seconds: 0,
             default_timezone: String::new(),
+            approval_timeout_seconds: 300,
             policy: rustynail::config::QuarryPolicyConfig::default(),
         }
     }

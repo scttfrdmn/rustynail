@@ -498,6 +498,18 @@ pub struct QuarryConfig {
     #[serde(default)]
     pub default_timezone: String,
 
+    /// How long a sender has to approve a plan before it is cancelled
+    /// (env: `QUARRY_APPROVAL_TIMEOUT_SECONDS`).
+    ///
+    /// **Expiry cancels at zero spend.** There is deliberately no setting that
+    /// makes silence into consent: a gate that approves when nobody replies is not
+    /// a gate. Setting this to `0` does not disable the gate either — it is clamped
+    /// to [`MIN_APPROVAL_TIMEOUT_SECONDS`], because a zero-second window would
+    /// cancel every run before the plan message finished sending, which reads as
+    /// "quarry is broken" rather than as a policy.
+    #[serde(default = "default_quarry_approval_timeout_seconds")]
+    pub approval_timeout_seconds: u64,
+
     /// Who may run quarry, with what caps, in what scope.
     ///
     /// **File-only.** A nested per-sender map cannot be expressed as a single
@@ -508,6 +520,21 @@ pub struct QuarryConfig {
     /// Empty means **nobody may run**. See [`QuarryPolicyConfig`].
     #[serde(default)]
     pub policy: QuarryPolicyConfig,
+}
+
+impl QuarryConfig {
+    /// The approval window, clamped to [`MIN_APPROVAL_TIMEOUT_SECONDS`].
+    ///
+    /// Callers must use this rather than reading the field: `0` is what an operator
+    /// writes meaning "turn the gate off", and the gate cannot be turned off. An
+    /// unclamped zero would cancel every run before its plan message arrived, which
+    /// looks like a broken integration rather than a deliberate policy.
+    pub fn approval_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.approval_timeout_seconds
+                .max(MIN_APPROVAL_TIMEOUT_SECONDS),
+        )
+    }
 }
 
 impl Default for QuarryConfig {
@@ -521,6 +548,7 @@ impl Default for QuarryConfig {
             retention_max_age_seconds: 0,
             run_timeout_seconds: default_quarry_run_timeout_seconds(),
             default_timezone: String::new(),
+            approval_timeout_seconds: default_quarry_approval_timeout_seconds(),
             policy: QuarryPolicyConfig::default(),
         }
     }
@@ -995,6 +1023,18 @@ fn default_quarry_retention_max_runs() -> usize {
 
 fn default_quarry_run_timeout_seconds() -> u64 {
     900 // 15 minutes
+}
+
+/// The shortest approval window that is not simply broken.
+///
+/// A window shorter than this cancels before a sender on a mobile client has seen
+/// the plan message, which presents as a malfunction rather than as a policy. The
+/// floor exists so a `0` in config — the value an operator writes meaning "off" —
+/// does not silently become "cancel everything".
+pub const MIN_APPROVAL_TIMEOUT_SECONDS: u64 = 15;
+
+fn default_quarry_approval_timeout_seconds() -> u64 {
+    300 // 5 minutes: long enough to read a plan, short enough not to pin a slot
 }
 
 fn default_llm_provider() -> String {
@@ -1511,6 +1551,10 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_quarry_run_timeout_seconds),
                 default_timezone: std::env::var("QUARRY_DEFAULT_TIMEZONE").unwrap_or_default(),
+                approval_timeout_seconds: std::env::var("QUARRY_APPROVAL_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_quarry_approval_timeout_seconds),
                 // Policy is file-only, and an env-only configuration therefore
                 // grants nobody a quarry run. That is the intended default-deny,
                 // not an omission: there is no env var that could safely express a

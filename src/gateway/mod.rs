@@ -21,7 +21,7 @@ use crate::memory::{
     InMemoryStore, MemoryStore, MemorySummarizer, PostgresStore, RedisStore, SqliteStore,
     VectorMemoryStore,
 };
-use crate::quarry::Supervisor as QuarrySupervisor;
+use crate::quarry::{ApprovalRegistry, ReplyOutcome, Supervisor as QuarrySupervisor};
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
@@ -149,6 +149,12 @@ pub struct Gateway {
     /// caller gets [`crate::quarry::SpawnError::Disabled`] — a reason — rather than
     /// a missing capability it has to guess about.
     quarry: Arc<QuarrySupervisor>,
+    /// Pending plan approvals, keyed by (channel, sender).
+    ///
+    /// Held on the gateway rather than per-run because a reply arrives as an
+    /// ordinary inbound message, so the pipeline has to be able to look up "does
+    /// this sender owe me an answer" before it processes anything.
+    quarry_approvals: Arc<ApprovalRegistry>,
 }
 
 impl Gateway {
@@ -448,6 +454,7 @@ impl Gateway {
 
         let quarry =
             Arc::new(QuarrySupervisor::new(config.quarry.clone()).with_audit(audit.clone()));
+        let quarry_approvals = Arc::new(ApprovalRegistry::new().with_audit(audit.clone()));
         if config.quarry.enabled {
             info!(
                 "quarry runs enabled (binary={}, max_concurrent={})",
@@ -478,6 +485,29 @@ impl Gateway {
             formatter,
             auto_route_attachments,
             quarry,
+            quarry_approvals,
+        }
+    }
+
+    /// The pending plan-approval registry.
+    ///
+    /// A quarry caller registers here and the message pipeline offers every inbound
+    /// message to it, which is how a chat reply reaches a suspended run. Nothing is
+    /// persisted: a restart drops pending approvals rather than resuming them, since
+    /// an approval given before a restart was given against a policy that may since
+    /// have changed.
+    pub fn quarry_approvals(&self) -> Arc<ApprovalRegistry> {
+        Arc::clone(&self.quarry_approvals)
+    }
+
+    /// A responder that delivers to `channel_id` through the normal outbound path.
+    pub fn responder(&self, channel_id: &str) -> GatewayResponder {
+        GatewayResponder {
+            channels: Arc::clone(&self.channels),
+            stats: Arc::clone(&self.stats),
+            channel_id: channel_id.to_string(),
+            formatter: Arc::clone(&self.formatter),
+            chunker: self.chunker.clone(),
         }
     }
 
@@ -959,6 +989,7 @@ impl Gateway {
             let chunker = self.chunker.clone();
             let formatter = self.formatter.clone();
             let auto_route_attachments = self.auto_route_attachments;
+            let quarry_approvals = self.quarry_approvals.clone();
 
             let msg_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
@@ -982,6 +1013,7 @@ impl Gateway {
                         chunker.clone(),
                         formatter.clone(),
                         auto_route_attachments,
+                        Some(quarry_approvals.clone()),
                     )
                     .instrument(span)
                     .await
@@ -1106,6 +1138,7 @@ impl Gateway {
             self.chunker.clone(),
             self.formatter.clone(),
             self.auto_route_attachments,
+            Some(self.quarry_approvals.clone()),
         )
         .instrument(span)
         .await
@@ -1158,6 +1191,7 @@ pub async fn handle_message_for_test(
         None,
         formatter,
         false,
+        None,
     )
     .await
 }
@@ -1179,15 +1213,30 @@ async fn handle_message_inner(
     chunker: Option<Arc<MessageChunker>>,
     formatter: Arc<ResponseFormatter>,
     auto_route_attachments: bool,
+    quarry_approvals: Option<Arc<ApprovalRegistry>>,
 ) -> Result<()> {
     info!(
         "Handling message from {} in channel {}",
         message.username, message.channel_id
     );
 
+    // Whether this sender owes an answer to a plan gate. Resolved up front because
+    // it changes what two later stages are allowed to do with the message.
+    let awaiting_approval = match &quarry_approvals {
+        Some(reg) => reg.has_pending(&message.user_id, &message.channel_id).await,
+        None => false,
+    };
+
     // ── Deduplication ─────────────────────────────────────────────────────────
+    //
+    // An approval reply is exempt. It is one word, so a sender who approves two runs
+    // in a session sends byte-identical content twice — which the ring buffer reads
+    // as a repeat and drops, leaving the second run to expire unapproved with
+    // nothing to explain it. The exemption is narrow: it applies only while that
+    // sender has an approval outstanding on that channel, of which there is at most
+    // one.
     if let Some(ref dedup) = deduplicator {
-        if dedup.lock().await.seen(&message.user_id, &message.content) {
+        if !awaiting_approval && dedup.lock().await.seen(&message.user_id, &message.content) {
             tracing::debug!("Duplicate message from '{}', dropping", message.user_id);
             return Ok(());
         }
@@ -1200,6 +1249,58 @@ async fn handle_message_inner(
             channel_id: message.channel_id.clone(),
             bytes: message.content.len(),
         });
+    }
+
+    // ── quarry plan-gate reply ────────────────────────────────────────────────
+    //
+    // Offered before the rate limiter on purpose. A `no` that gets rate-limited is a
+    // run the sender tried to cancel and could not, and cancelling must never be the
+    // thing that fails. The exemption cannot be used as a bypass: settling clears
+    // the pending entry, so the next message from this sender takes the normal path
+    // with the limiter in it, and there is at most one pending approval per sender
+    // per channel.
+    if awaiting_approval {
+        // `awaiting_approval` implies the registry is present.
+        let reg = quarry_approvals
+            .as_ref()
+            .expect("pending implies a registry");
+        match reg
+            .submit_reply(&message.user_id, &message.channel_id, &message.content)
+            .await
+        {
+            ReplyOutcome::Settled {
+                request_id,
+                decision,
+            } => {
+                // The waiting run sends its own acknowledgement through the same
+                // path this function would, so saying anything here would double it.
+                info!(
+                    "quarry plan gate {request_id} settled as {} by {}",
+                    decision.code(),
+                    message.user_id
+                );
+                return Ok(());
+            }
+            ReplyOutcome::NeedsClarification { request_id } => {
+                // Re-prompt and swallow. Falling through to the agent would answer
+                // "maybe" with a chat completion while the sender is mid-decision,
+                // and the run is still waiting either way.
+                tracing::debug!("quarry plan gate {request_id}: reply not understood");
+                send_text(
+                    channels,
+                    stats,
+                    &message.channel_id,
+                    &crate::quarry::render_clarification(),
+                    &formatter,
+                    &chunker,
+                )
+                .await?;
+                return Ok(());
+            }
+            // Raced: the approval settled or expired between the check above and
+            // here. Not a reply to anything, so it is an ordinary message.
+            ReplyOutcome::NothingPending => {}
+        }
     }
 
     // ── Per-user rate limiting ────────────────────────────────────────────────
@@ -1300,21 +1401,73 @@ async fn handle_message_inner(
 
     memory.add_message(&message.user_id, format!("Assistant: {}", response_content));
 
-    // ── Format response for platform ─────────────────────────────────────────
-    let formatted = formatter.format(&response_content, &message.channel_id);
+    // ── Format, chunk and send ───────────────────────────────────────────────
+    send_text(
+        channels,
+        stats,
+        &response_channel_id,
+        &response_content,
+        &formatter,
+        &chunker,
+    )
+    .await
+}
 
-    // ── Chunk and send ────────────────────────────────────────────────────────
-    let chunks = match &chunker {
-        Some(c) => c.chunk(&message.channel_id, &formatted),
+/// A [`crate::quarry::Responder`] that sends through the gateway's own outbound path.
+///
+/// The plan gate needs the formatter and the chunker applied, and it needs them
+/// applied by the *same* code that formats an agent reply — a second copy would
+/// eventually drift, and the drift would show up as a plan message truncated on the
+/// one platform nobody tests by hand.
+pub struct GatewayResponder {
+    channels: Arc<RwLock<Vec<Box<dyn Channel>>>>,
+    stats: Arc<MessageStats>,
+    channel_id: String,
+    formatter: Arc<ResponseFormatter>,
+    chunker: Option<Arc<MessageChunker>>,
+}
+
+#[async_trait::async_trait]
+impl crate::quarry::Responder for GatewayResponder {
+    async fn reply(&self, text: &str) -> Result<()> {
+        send_text(
+            &self.channels,
+            &self.stats,
+            &self.channel_id,
+            text,
+            &self.formatter,
+            &self.chunker,
+        )
+        .await
+    }
+}
+
+/// Format, chunk and deliver `text` on `channel_id`.
+///
+/// The single outbound path. Extracted so the plan gate's messages take exactly the
+/// same route as an agent reply — a plan sent around the chunker arrives truncated on
+/// Teams' 1024-byte limit, which is how a sender ends up approving a plan whose
+/// limits were cut off the bottom.
+async fn send_text(
+    channels: &Arc<RwLock<Vec<Box<dyn Channel>>>>,
+    stats: &Arc<MessageStats>,
+    channel_id: &str,
+    text: &str,
+    formatter: &Arc<ResponseFormatter>,
+    chunker: &Option<Arc<MessageChunker>>,
+) -> Result<()> {
+    let formatted = formatter.format(text, channel_id);
+    let chunks = match chunker {
+        Some(c) => c.chunk(channel_id, &formatted),
         None => vec![formatted],
     };
 
     let channels = channels.read().await;
     for channel in channels.iter() {
-        if channel.id() == response_channel_id {
+        if channel.id() == channel_id {
             for chunk in &chunks {
                 let response = Message::new(
-                    response_channel_id.clone(),
+                    channel_id.to_string(),
                     "assistant".to_string(),
                     "RustyNail".to_string(),
                     chunk.clone(),
@@ -1326,10 +1479,7 @@ async fn handle_message_inner(
         }
     }
 
-    error!(
-        "No channel found with id '{}' to send response",
-        response_channel_id
-    );
+    error!("No channel found with id '{}' to send response", channel_id);
     Ok(())
 }
 
@@ -1392,6 +1542,9 @@ pub async fn handle_message_for_test_full(
         chunker,
         formatter,
         false,
+        // No plan gate: this entry point exists for the pipeline tests, and
+        // `tests/quarry_plan_gate.rs` drives the gate through the registry directly.
+        None,
     )
     .await
 }

@@ -108,6 +108,31 @@ pub enum AuditEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         scope_key: Option<String>,
     },
+    /// A sender approved, cancelled, or let expire a quarry plan gate.
+    ///
+    /// The record of who agreed to spend. Cancellations and timeouts are logged
+    /// too, and for the same reason: "nobody approved this" is the fact that
+    /// explains an absent run, and without it a cancelled run and a run that was
+    /// never requested look identical.
+    ///
+    /// `decision` is one of `approved`, `cancelled`, `expired`, `superseded`.
+    ///
+    /// The caps are recorded alongside it because an approval that does not say
+    /// *what* was approved cannot answer the question it exists to answer. They are
+    /// the granted caps as shown in the plan message, not what the sender asked for
+    /// — [`AuditEvent::QuarryPolicyDecision`] already holds that.
+    QuarryPlanDecision {
+        request_id: String,
+        user_id: String,
+        channel_id: String,
+        decision: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spend_micro_usd: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        latency_seconds: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
+    },
     /// A quarry run could not be started, or failed in supervision.
     QuarryRunFailed {
         #[serde(skip_serializing_if = "Option::is_none")]
