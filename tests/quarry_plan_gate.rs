@@ -64,10 +64,12 @@ while [ $# -gt 0 ]; do
     *) shift;;
   esac
 done
+printf '%s\n' '{{"type":"quarry_stream","version":1,"producer":"quarry-go"}}'
 printf '%s\n' '{{"type":"model","tier":"m-1","label":"m-1","state":"done","cost":0.05}}'
 printf '%s\n' '{{"type":"answer","text":"two, Phobos and Deimos"}}'
 printf '%s\n' '{{"type":"receipt","rows":[{{"label":"n0 q","kind":"llm","cost":0.05}}],"total":0.05}}'
-[ -n "$OUT" ] && printf '%s' '{{"RunID":"fake","BoundBy":"","Outcomes":[{{"NodeID":"n0","Content":"a","Cost":50000,"Model":"m-1","Verified":true}}]}}' > "$OUT"
+printf '%s\n' '{{"type":"quarry_outcome","outcome":"complete","bound_by":"","gaps":0,"unfunded":0,"total_micros":50000,"cap_micros":5000000}}'
+[ -n "$OUT" ] && printf '%s' '{{"RunID":"fake","BoundBy":"","Caps":{{"Spend":5000000,"Latency":0,"Due":"0001-01-01T00:00:00Z"}},"Unverified":null,"Outcomes":[{{"NodeID":"n0","Content":"a","Cost":50000,"Model":"m-1","Verified":true,"Children":null}}]}}' > "$OUT"
 exit 0
 "#,
             log = invocations.display()
@@ -602,5 +604,218 @@ async fn the_plan_states_the_granted_caps_not_the_requested_ones() {
     assert!(
         text.contains("you asked for spend $50.0000, policy allows $5.0000"),
         "the clamp was silent: {text}"
+    );
+}
+
+// ── Delivery: the answer and its receipt, together ────────────────────────────
+
+/// An approved run's answer reaches the sender **with its receipt attached**.
+///
+/// `Gateway::deliver_quarry_outcome` is the only path an outcome takes to a sender,
+/// and this is the property that makes it worth being the only one: the answer and
+/// the receipt are rendered together by one call with no option to emit just the
+/// first. A second delivery site would eventually send a bare answer, which is the
+/// artifact quarry exists to replace.
+#[tokio::test]
+async fn a_delivered_run_carries_its_receipt_and_not_just_the_answer() {
+    let fake = RecordingQuarry::build();
+    let (gw, captured) = gateway(&fake, None, false).await;
+    let gw = Arc::new(gw);
+
+    let plan = disclosure(grant(&gw).await, Duration::from_secs(10));
+    let req = request(&gw).await;
+    let g = Arc::clone(&gw);
+    let gate = tokio::spawn(async move {
+        run_gated(
+            &g.quarry_approvals(),
+            &g.quarry(),
+            &g.responder("testchan-1"),
+            "req-deliver",
+            &plan,
+            req,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+    });
+
+    while gw.quarry_approvals().pending_count().await == 0 {
+        tokio::task::yield_now().await;
+    }
+    inject(&gw, "alice", "yes").await;
+
+    let outcome = gate.await.expect("join").expect("gate ok");
+    let run = match outcome {
+        rustynail::quarry::GateOutcome::Ran(o) => o,
+        other => panic!("expected a run: {other:?}"),
+    };
+
+    // Drain the plan message first so what remains is only the delivery.
+    let _plan = drain(&captured).await;
+    gw.deliver_quarry_outcome("testchan-1", &run)
+        .await
+        .expect("delivery through the real outbound path");
+
+    let sent = drain(&captured).await.join("\n");
+    assert!(
+        sent.contains("two, Phobos and Deimos"),
+        "the answer did not arrive: {sent}"
+    );
+    // The receipt, not merely a cost figure: the heading, the spend, the trust
+    // statement, and something citable.
+    assert!(sent.contains("**Receipt**"), "no receipt: {sent}");
+    assert!(sent.contains("$0.0500"), "no spend figure: {sent}");
+    assert!(
+        sent.contains("How much to trust it"),
+        "no trust section: {sent}"
+    );
+    assert!(sent.contains("Full record"), "nothing citable: {sent}");
+    // The fake publishes no provenance, which is the common case — and it must read
+    // as unmeasured rather than as a zero.
+    assert!(
+        sent.contains("not measured"),
+        "stability read as 0%: {sent}"
+    );
+    assert!(
+        !sent.contains("0% of claims"),
+        "silence was rendered as a finding: {sent}"
+    );
+}
+
+/// Delivery on Teams' 1024-byte limit chunks the reply and keeps the receipt.
+///
+/// The tightest of the five platform defaults, driven through the gateway's own
+/// chunker rather than a chunker the test constructs — a delivery path that bypassed
+/// the chunker would arrive truncated here, with the footer being the part cut off.
+#[tokio::test]
+async fn delivery_under_a_tight_platform_limit_chunks_rather_than_dropping_the_receipt() {
+    let fake = RecordingQuarry::build();
+    // 200 bytes: tighter than any real platform, so the footer alone spans several
+    // messages and "it happened to fit" cannot be why this passes.
+    let (gw, captured) = gateway(&fake, Some(200), false).await;
+    let gw = Arc::new(gw);
+
+    let plan = disclosure(grant(&gw).await, Duration::from_secs(10));
+    let req = request(&gw).await;
+    let g = Arc::clone(&gw);
+    let gate = tokio::spawn(async move {
+        run_gated(
+            &g.quarry_approvals(),
+            &g.quarry(),
+            &g.responder("testchan-1"),
+            "req-deliver-chunked",
+            &plan,
+            req,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+    });
+
+    while gw.quarry_approvals().pending_count().await == 0 {
+        tokio::task::yield_now().await;
+    }
+    inject(&gw, "alice", "yes").await;
+
+    let outcome = gate.await.expect("join").expect("gate ok");
+    let run = match outcome {
+        rustynail::quarry::GateOutcome::Ran(o) => o,
+        other => panic!("expected a run: {other:?}"),
+    };
+
+    let _plan = drain(&captured).await;
+    gw.deliver_quarry_outcome("testchan-1", &run)
+        .await
+        .expect("delivery");
+
+    let chunks = drain(&captured).await;
+    assert!(
+        chunks.len() > 1,
+        "nothing was chunked at a 200-byte limit, so this proves nothing: {chunks:?}"
+    );
+    for (i, c) in chunks.iter().enumerate() {
+        assert!(c.len() <= 200, "chunk {i} is {} bytes: {c}", c.len());
+    }
+    let reassembled = chunks.join(" ");
+    assert!(
+        reassembled.contains("**Receipt**"),
+        "the receipt was dropped to fit: {reassembled}"
+    );
+    assert!(
+        reassembled.contains("Full record"),
+        "the citation was dropped to fit: {reassembled}"
+    );
+}
+
+/// Delivering an outcome publishes it to the dashboard too.
+///
+/// One call does both, so an operator's view and the sender's reply cannot disagree
+/// about what a run cost. Subscribing before delivery is what makes this assertable:
+/// the broadcast drops messages with no subscribers, so a subscribe-after would read
+/// empty and look like a silent gateway.
+#[tokio::test]
+async fn delivering_a_run_also_publishes_its_tree_to_the_dashboard() {
+    let fake = RecordingQuarry::build();
+    let (gw, _captured) = gateway(&fake, None, false).await;
+    let gw = Arc::new(gw);
+
+    let mut events = gw.stats().subscribe();
+
+    let plan = disclosure(grant(&gw).await, Duration::from_secs(10));
+    let req = request(&gw).await;
+    let g = Arc::clone(&gw);
+    let gate = tokio::spawn(async move {
+        run_gated(
+            &g.quarry_approvals(),
+            &g.quarry(),
+            &g.responder("testchan-1"),
+            "req-deliver-dash",
+            &plan,
+            req,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+    });
+
+    while gw.quarry_approvals().pending_count().await == 0 {
+        tokio::task::yield_now().await;
+    }
+    inject(&gw, "alice", "yes").await;
+
+    let outcome = gate.await.expect("join").expect("gate ok");
+    let run = match outcome {
+        rustynail::quarry::GateOutcome::Ran(o) => o,
+        other => panic!("expected a run: {other:?}"),
+    };
+
+    gw.deliver_quarry_outcome("testchan-1", &run)
+        .await
+        .expect("delivery");
+
+    // Walk past the message events the plan and the reply generated.
+    let mut found = None;
+    while let Ok(ev) = events.try_recv() {
+        if let rustynail::gateway::dashboard::DashboardEvent::QuarryRun { .. } = ev {
+            found = Some(ev);
+            break;
+        }
+    }
+    let ev = found.expect("delivery must publish a QuarryRun event");
+    let rustynail::gateway::dashboard::DashboardEvent::QuarryRun {
+        spend_micro_usd,
+        nodes,
+        stability_measured,
+        ..
+    } = ev
+    else {
+        unreachable!("matched above");
+    };
+    assert_eq!(spend_micro_usd, Some(50_000));
+    assert_eq!(nodes.len(), 1, "the fake's record has one node");
+    assert_eq!(nodes[0].id, "n0");
+    assert!(
+        !stability_measured,
+        "the fake publishes no provenance, so nothing is measured"
     );
 }

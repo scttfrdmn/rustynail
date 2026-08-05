@@ -500,6 +500,11 @@ impl Gateway {
         Arc::clone(&self.quarry_approvals)
     }
 
+    /// The shared message statistics, including the dashboard event broadcast.
+    pub fn stats(&self) -> Arc<MessageStats> {
+        Arc::clone(&self.stats)
+    }
+
     /// A responder that delivers to `channel_id` through the normal outbound path.
     pub fn responder(&self, channel_id: &str) -> GatewayResponder {
         GatewayResponder {
@@ -514,6 +519,29 @@ impl Gateway {
     /// The quarry run supervisor.
     pub fn quarry(&self) -> Arc<QuarrySupervisor> {
         Arc::clone(&self.quarry)
+    }
+
+    /// Deliver a finished quarry run: the answer, its receipt, and the tree.
+    ///
+    /// The **only** way a quarry outcome reaches a sender. One function rather than a
+    /// send at each call site, because the property being protected is that no path
+    /// can deliver an answer without its receipt — and a second call site is how one
+    /// eventually does. [`crate::quarry::Receipt::render`] emits both together and
+    /// has no option that emits only the first.
+    ///
+    /// The dashboard is published **before** the send, so an operator sees the run
+    /// even when the channel is down — the run happened and the money went out
+    /// whether or not the reply arrived. A send failure propagates; a broadcast with
+    /// no subscribers does not, which is the ordinary case for both.
+    pub async fn deliver_quarry_outcome(
+        &self,
+        channel_id: &str,
+        outcome: &crate::quarry::RunOutcome,
+    ) -> Result<()> {
+        use crate::quarry::Responder;
+        let receipt = crate::quarry::Receipt::from_outcome(outcome);
+        self.stats.record_quarry_run(outcome);
+        self.responder(channel_id).reply(&receipt.render()).await
     }
 
     /// Resolve what a sender may spend, and the scope their run carries.

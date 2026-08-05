@@ -39,7 +39,35 @@
   .badge-running { background: #14532d; color: #4ade80; }
   .badge-stopped { background: #1e1b22; color: #6b7280; }
 
+  /* quarry: gaps and unfunded get DIFFERENT colours on purpose. They are different
+     denominations with opposite remedies — more time recovers a gap, more money funds
+     an unfunded node — so one shared "incomplete" style would tell an operator to
+     raise whichever cap came to mind. Amber for the clock, blue for the budget. */
+  .badge-gap { background: #713f12; color: #fbbf24; }
+  .badge-unfunded { background: #1e3a5f; color: #60a5fa; }
+  .badge-cached { background: #164e63; color: #22d3ee; }
+  .badge-verified { background: #14532d; color: #4ade80; }
+  .badge-refuted { background: #7f1d1d; color: #f87171; }
+  /* Not assessed is deliberately grey rather than red: nobody looked, which is not
+     the same claim as "looked and found it wrong". */
+  .badge-unassessed { background: #1e1b22; color: #94a3b8; }
+
   .empty-row td { color: #475569; font-style: italic; text-align: center; padding: 2rem; }
+
+  /* quarry decomposition tree */
+  #quarry-runs { display: flex; flex-direction: column; gap: 1rem; }
+  .quarry-run { background: #1a1d27; border: 1px solid #2d3148; border-radius: 0.75rem; padding: 1rem 1.25rem; }
+  .quarry-run .run-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem; }
+  .quarry-run .run-head .outcome { font-weight: 700; color: #f8fafc; }
+  .quarry-run .run-head .spend { color: #cbd5e1; font-variant-numeric: tabular-nums; }
+  .quarry-run .run-head .record-id { font-size: 0.7rem; color: #64748b; font-family: ui-monospace, monospace; }
+  .quarry-run .run-notes { font-size: 0.8rem; color: #94a3b8; display: flex; flex-direction: column; gap: 0.2rem; margin-bottom: 0.75rem; }
+  .quarry-tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+  .quarry-tree .node { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.15rem 0; }
+  .quarry-tree .node .nid { color: #a78bfa; flex-shrink: 0; }
+  .quarry-tree .node .ncost { color: #64748b; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .quarry-tree .node .nproblem { color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .quarry-empty { color: #475569; font-style: italic; padding: 1.5rem; text-align: center; background: #1a1d27; border: 1px solid #2d3148; border-radius: 0.75rem; }
 </style>
 </head>
 <body>
@@ -86,6 +114,13 @@
       <thead><tr><th>Time</th><th>Direction</th><th>Channel</th><th>User</th><th>Preview</th></tr></thead>
       <tbody id="messages-body"><tr class="empty-row"><td colspan="5">Loading…</td></tr></tbody>
     </table>
+  </div>
+
+  <div class="section">
+    <h2>quarry Runs</h2>
+    <div id="quarry-runs">
+      <div class="quarry-empty">No quarry runs yet</div>
+    </div>
   </div>
 </main>
 
@@ -197,7 +232,13 @@ function connectWs() {
         document.getElementById('last-updated').textContent = 'Live ● ' + new Date().toLocaleTimeString();
       } else if (data.type === 'message_event') {
         prependMessageRow(data);
+      } else if (data.type === 'quarry_run') {
+        prependQuarryRun(data);
       }
+      // An unrecognised `type` is ignored on purpose. quarry's own event union is open
+      // — "adding an event kind cannot break an existing consumer" — and the same
+      // courtesy applies here: a newer gateway must be able to send a kind this page
+      // has never seen without breaking the rest of the dashboard.
     } catch (e) {
       console.error('WS parse error:', e);
     }
@@ -232,6 +273,122 @@ function prependMessageRow(data) {
   // Keep at most 50 rows
   while (mb.rows.length > 50) {
     mb.deleteRow(mb.rows.length - 1);
+  }
+}
+
+// ── quarry decomposition tree ─────────────────────────────────────────────────
+
+/// Escape text destined for innerHTML.
+///
+/// quarry node problems are sender-supplied text that has round-tripped through an
+/// LLM, so it can contain anything. Interpolating it raw would put a script tag from a
+/// chat message into the operator's dashboard.
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/// Micro-dollars as a currency figure. Four decimals, matching the chat receipt, so
+/// the same run reads the same in both places.
+function fmtMicros(m) {
+  if (m == null) return 'not reported';
+  if (m < 0) return 'no limit';
+  return '$' + (m / 1000000).toFixed(4);
+}
+
+/// Render the tree from quarry's flat node list plus its `children` edges.
+///
+/// Depth comes from walking the edges the record states, not from counting the dots in
+/// a node ID. The dots happen to encode depth today, but that is quarry's internal
+/// naming rather than a documented contract, and the edges are stated explicitly.
+function renderQuarryTree(nodes) {
+  if (!nodes || nodes.length === 0) {
+    return '<div class="quarry-tree"><div class="node"><span class="nproblem">No node detail — quarry wrote no record for this run.</span></div></div>';
+  }
+
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const isChild = new Set();
+  nodes.forEach(n => (n.children || []).forEach(c => isChild.add(c)));
+  const roots = nodes.filter(n => !isChild.has(n.id));
+
+  const rows = [];
+  const seen = new Set();
+  function walk(node, depth) {
+    // A cycle would hang the page. quarry's trees are acyclic, but the guard costs
+    // nothing and the alternative is an unresponsive dashboard.
+    if (!node || seen.has(node.id)) return;
+    seen.add(node.id);
+
+    const badges = [];
+    // Two badges, never one. See the CSS note: the remedies are opposite.
+    if (node.gap) badges.push('<span class="badge badge-gap">time gap</span>');
+    if (node.unfunded) badges.push('<span class="badge badge-unfunded">unfunded</span>');
+    if (node.cache_hit) badges.push('<span class="badge badge-cached">cached</span>');
+    // Three states, not two: null is "no verifier assessed", which is not a refutation.
+    if (node.verified === true) badges.push('<span class="badge badge-verified">verified</span>');
+    else if (node.verified === false) badges.push('<span class="badge badge-refuted">refuted</span>');
+    else badges.push('<span class="badge badge-unassessed">not assessed</span>');
+
+    rows.push(`<div class="node" style="padding-left:${depth * 1.25}rem">
+      <span class="nid">${esc(node.id)}</span>
+      <span class="ncost">${fmtMicros(node.cost_micro_usd)}</span>
+      ${badges.join(' ')}
+      <span class="nproblem">${esc(node.problem)}</span>
+    </div>`);
+
+    (node.children || []).forEach(cid => walk(byId.get(cid), depth + 1));
+  }
+  roots.forEach(r => walk(r, 0));
+  // Any node not reachable from a root is still shown: dropping it would understate
+  // the tree, and an orphan is itself worth seeing.
+  nodes.forEach(n => { if (!seen.has(n.id)) walk(n, 0); });
+
+  return `<div class="quarry-tree">${rows.join('')}</div>`;
+}
+
+function prependQuarryRun(data) {
+  const container = document.getElementById('quarry-runs');
+  const empty = container.querySelector('.quarry-empty');
+  if (empty) empty.remove();
+
+  const notes = [];
+
+  // `bound_by` empty is a measurement quarry emits deliberately — no cap bound this
+  // run — so it is stated rather than left off.
+  notes.push(data.bound_by
+    ? `Stopped by <strong>${esc(data.bound_by)}</strong>`
+    : 'No limit was reached');
+
+  // Two separate lines with two separate remedies. Never summed into one count.
+  if (data.gaps > 0) {
+    notes.push(`<span class="badge badge-gap">${data.gaps} time gap${data.gaps === 1 ? '' : 's'}</span> — more time would recover these; more money would not`);
+  }
+  if (data.unfunded > 0) {
+    notes.push(`<span class="badge badge-unfunded">${data.unfunded} unfunded</span> — planned degradation; a higher spend limit would fund these`);
+  }
+
+  // "Not measured" is rendered in words. A missing rate is quarry declining to publish
+  // one — every ordinary run is a single sample (P7) — and showing it as 0% would turn
+  // that silence into a finding of total irreproducibility.
+  notes.push(data.stability_measured
+    ? `Stability: at least ${Math.round(data.stability * 100)}% of claims replicated`
+    : 'Stability: not measured — one run is one sample, not a distribution (P7). This is not 0%.');
+
+  const div = document.createElement('div');
+  div.className = 'quarry-run';
+  div.innerHTML = `
+    <div class="run-head">
+      <span class="outcome">${esc(data.outcome || 'unknown outcome')}</span>
+      <span class="spend">${fmtMicros(data.spend_micro_usd)} of ${fmtMicros(data.cap_micro_usd)}</span>
+      <span class="record-id">${esc(data.record_id || data.run_id)}</span>
+    </div>
+    <div class="run-notes">${notes.map(n => `<div>${n}</div>`).join('')}</div>
+    ${renderQuarryTree(data.nodes)}`;
+  container.insertBefore(div, container.firstChild);
+
+  while (container.children.length > 10) {
+    container.removeChild(container.lastChild);
   }
 }
 

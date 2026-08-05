@@ -689,3 +689,153 @@ fn a_stream_cut_mid_line_is_incomplete_not_merely_bad() {
          than merely absent"
     );
 }
+
+// ── The record parses at all ───────────────────────────────────────────────────
+
+/// Every vendored record deserializes, and its figures match the expectations.
+///
+/// This is the test that was missing when the record type shipped, and its absence
+/// cost the whole record path: Go marshals a **nil slice as `null`**, and
+/// `#[serde(default)]` does not cover an explicit null — only an absent key. Every
+/// one of these eight records contains at least one nil slice, so *not a single real
+/// quarry record parsed*, and `RunOutcome::record` was always `None` in production.
+///
+/// It failed silently for two compounding reasons. The supervisor treats an
+/// unparseable record as an absent one, which is correct — a crashed run may not have
+/// written one — so the only symptom was a `warn!` nobody read. And every fixture
+/// written by hand spelled its empty lists `[]`, which is exactly what a captured
+/// record does not do. This is what a vendored corpus is for.
+#[test]
+fn every_vendored_record_deserializes() {
+    let dir = corpus_dir();
+    let mut checked = 0;
+    for case in CASES {
+        let path = dir.join(format!("{case}.json"));
+        // `unknown-kind` is a synthetic stream with no accompanying record.
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let record: rustynail::quarry::RunRecordSummary = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{case}: quarry's own record does not parse: {e}\n\
+                     A nil Go slice arrives as `null`, which #[serde(default)] does not \
+                     cover — every list field needs the null-tolerant deserializer."
+                )
+            });
+        assert!(
+            !record.run_id.is_empty(),
+            "{case}: record has no RunID, so nothing is citable"
+        );
+        assert!(
+            !record.outcomes.is_empty(),
+            "{case}: record has no Outcomes — a record with no nodes would make every \
+             per-node figure below vacuous"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 8,
+        "only {checked} records checked; the corpus should carry a record for every \
+         captured case"
+    );
+}
+
+/// The record's `BoundBy` agrees with the terminal event's.
+///
+/// Two independent statements of the same fact, from two files quarry wrote
+/// separately. They are *allowed* to be read from either place — but if they ever
+/// disagree, the host has been choosing arbitrarily between two verdicts without
+/// knowing it.
+#[test]
+fn the_record_and_the_terminal_event_agree_on_which_cap_bit() {
+    for case in CASES {
+        let path = corpus_dir().join(format!("{case}.json"));
+        if !path.is_file() {
+            continue;
+        }
+        let record: rustynail::quarry::RunRecordSummary =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let (events, _) = read_stream(case);
+        let outcome = terminal_outcome(&events).unwrap();
+        assert_eq!(
+            record.bound_by, outcome.bound_by,
+            "{case}: record says BoundBy={:?} but the stream says {:?}",
+            record.bound_by, outcome.bound_by
+        );
+    }
+}
+
+/// The record's own gap list agrees with the terminal event's gap count.
+///
+/// The record is what can name *which* nodes gapped; the event carries only how
+/// many. A receipt uses both, so a disagreement would put a count and a list of
+/// different lengths side by side in the same footer.
+#[test]
+fn the_record_gap_list_matches_the_terminal_gap_count() {
+    for case in CASES {
+        let path = corpus_dir().join(format!("{case}.json"));
+        if !path.is_file() {
+            continue;
+        }
+        let record: rustynail::quarry::RunRecordSummary =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let (events, _) = read_stream(case);
+        let outcome = terminal_outcome(&events).unwrap();
+        assert_eq!(
+            record.gaps().len() as u64,
+            outcome.gaps,
+            "{case}: record names {} gapped nodes, stream counts {}",
+            record.gaps().len(),
+            outcome.gaps
+        );
+        assert_eq!(
+            record.unfunded().len() as u64,
+            outcome.unfunded,
+            "{case}: record finds {} unfunded nodes, stream counts {}",
+            record.unfunded().len(),
+            outcome.unfunded
+        );
+    }
+}
+
+/// The record's caps are read in the units Go wrote them in.
+///
+/// Two traps in one struct. `Latency` is a `time.Duration`, which marshals as an
+/// **integer count of nanoseconds** — `time-truncated` carries `190000000`, which is
+/// 190ms as nanoseconds and six years as seconds, and the wrong reading makes a tight
+/// cap look like no cap at all. `Due` is a `time.Time`, whose zero value is year 1,
+/// so an unset deadline arrives as `0001-01-01T00:00:00Z` rather than as an empty
+/// string, and a naive reading puts a year-1 deadline in a receipt.
+#[test]
+fn record_caps_are_read_in_gos_units() {
+    let expectations: &[(&str, Option<u64>, i64)] = &[
+        // case, latency in millis, spend cap in micro-units
+        ("complete", None, 250_000),
+        ("time-truncated", Some(190), 1_000_000),
+        ("no-answer-time", Some(150), 1_000_000),
+        ("no-answer-spend", None, 1),
+        // The unlimited sentinel: -1 is "no cap", not a cap of minus one micro-dollar
+        // and not a cap of nothing.
+        ("deadline-only", Some(5_000), -1),
+    ];
+    for (case, latency_ms, spend) in expectations {
+        let path = corpus_dir().join(format!("{case}.json"));
+        let record: rustynail::quarry::RunRecordSummary =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            record.caps.latency(),
+            latency_ms.map(std::time::Duration::from_millis),
+            "{case}: latency cap misread — the field is nanoseconds"
+        );
+        assert_eq!(record.caps.spend, *spend, "{case}: spend cap");
+        // No corpus case sets a real deadline, and all of them carry Go's zero time,
+        // so every one must read as "no deadline".
+        assert_eq!(
+            record.caps.due(),
+            None,
+            "{case}: Go's zero time read as a real deadline in the year 1"
+        );
+    }
+}

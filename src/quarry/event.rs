@@ -533,6 +533,21 @@ pub fn parse_line(line: &str) -> Result<RunEvent, LineError> {
 /// `BoundBy`, `Outcomes`, `NodeID`, `Gap`, and so on, in Go's casing.
 /// Deserialising these as snake_case would silently match nothing and report every
 /// run as complete.
+///
+/// # Every list field must tolerate an explicit `null`
+///
+/// Go marshals a **nil slice as `null`**, not as `[]`, and `#[serde(default)]` does
+/// not cover an explicit null — it only covers an *absent* key. So a record whose
+/// `Unverified` is nil (any run where every node was verified) fails to deserialize
+/// outright unless the field goes through [`null_as_empty`].
+///
+/// This is not a corner: every one of the eight vendored corpus records contains at
+/// least one nil slice, so before that helper existed *no real quarry record parsed
+/// at all*. And it failed silently, because [`read_record`] treats a parse failure
+/// as an absent record — which is a legitimate outcome for a crashed run. Every
+/// hand-written test fixture spelled its empty lists `[]`, so nothing caught it.
+///
+/// [`read_record`]: super::supervisor
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RunRecordSummary {
     /// Content hash of the record — its identity.
@@ -541,8 +556,91 @@ pub struct RunRecordSummary {
     /// Which cap actually bit: `"spend"`, `"latency"`, `"due"`, or empty for none.
     #[serde(rename = "BoundBy", default)]
     pub bound_by: String,
-    #[serde(rename = "Outcomes", default)]
+    /// The caps the run was granted, so a receipt can state spend *against* its
+    /// limit rather than as a bare figure.
+    #[serde(rename = "Caps", default)]
+    pub caps: RecordCaps,
+    /// Node IDs no verifier assessed. Quarry's own list, not re-derived.
+    ///
+    /// Nil on any run where every node was verified, and Go writes nil as `null`.
+    #[serde(rename = "Unverified", default, deserialize_with = "null_as_empty")]
+    pub unverified: Vec<String>,
+    #[serde(rename = "Outcomes", default, deserialize_with = "null_as_empty")]
     pub outcomes: Vec<NodeOutcomeSummary>,
+}
+
+/// Deserialize a list that Go may have written as `null`.
+///
+/// Go's `encoding/json` writes a nil slice as `null` rather than `[]`, and serde's
+/// `default` attribute does not help: it fires for an **absent** key, not for a
+/// present one holding null. Without this, one nil list anywhere in the record makes
+/// the whole record unparseable.
+fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// The caps in force for a run, as the record states them.
+///
+/// Each field's zero value means **unset**, which is why none of them can be
+/// rendered without checking. Go's `time.Time` zero is year 1, so a `Due` of
+/// `0001-01-01T00:00:00Z` is "no deadline" and printing it would put a year-1
+/// deadline in a receipt.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RecordCaps {
+    /// Spend cap in micro-units. `-1` is unlimited; `0` is unset.
+    #[serde(rename = "Spend", default)]
+    pub spend: i64,
+    /// Latency cap in **nanoseconds** — Go's `time.Duration` marshals as an integer
+    /// count of nanoseconds, not as a string. Reading it as seconds would understate
+    /// a 3-minute cap by nine orders of magnitude.
+    #[serde(rename = "Latency", default)]
+    pub latency_nanos: i64,
+    /// Deadline as an RFC 3339 string, or Go's zero time when unset.
+    #[serde(rename = "Due", default)]
+    pub due: String,
+}
+
+impl RecordCaps {
+    /// The spend cap, or `None` when none was set.
+    ///
+    /// Unlimited (`-1`) is a cap that was *set* and is reported as such by
+    /// [`Self::spend_unlimited`] — this returns `None` only for genuinely absent.
+    pub fn spend_micro_usd(&self) -> Option<i64> {
+        match self.spend {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    /// Whether the spend cap was explicitly unlimited.
+    pub fn spend_unlimited(&self) -> bool {
+        self.spend == UNLIMITED_MICRO_USD
+    }
+
+    /// The latency cap as a [`std::time::Duration`], or `None` when unset.
+    pub fn latency(&self) -> Option<std::time::Duration> {
+        if self.latency_nanos <= 0 {
+            return None;
+        }
+        Some(std::time::Duration::from_nanos(self.latency_nanos as u64))
+    }
+
+    /// The deadline, or `None` when unset.
+    ///
+    /// Go's zero `time.Time` is year 1, so a record with no deadline carries
+    /// `"0001-01-01T00:00:00Z"` rather than an empty string. Both are treated as
+    /// absent: a receipt must not report a deadline of the year 1.
+    pub fn due(&self) -> Option<&str> {
+        match self.due.as_str() {
+            "" => None,
+            s if s.starts_with("0001-01-01") => None,
+            s => Some(s),
+        }
+    }
 }
 
 /// Per-node fields needed for the truncation verdict.
@@ -564,7 +662,8 @@ pub struct NodeOutcomeSummary {
     /// `None` means no verifier assessed this node — distinct from `Some(false)`.
     #[serde(rename = "Verified", default)]
     pub verified: Option<bool>,
-    #[serde(rename = "Children", default)]
+    /// Nil on every leaf node, and Go writes nil as `null`.
+    #[serde(rename = "Children", default, deserialize_with = "null_as_empty")]
     pub children: Vec<String>,
 }
 
