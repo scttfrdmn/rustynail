@@ -6,18 +6,25 @@
 //! — see [`supervisor`] for why, and for the degradation semantics that must not be
 //! flattened on the way through.
 //!
+//! - [`caps`] — parsing a sender's prose into quarry's `Caps`, or a question.
 //! - [`event`] — the `RunEvent` wire types and the NDJSON line parser.
 //! - [`supervisor`] — spawning, lifecycle, and outcome classification.
 //!
 //! # What this module deliberately does not do
 //!
-//! It does not decide what a sender may spend. Caps and scope arrive already
-//! resolved on a [`supervisor::RunRequest`]; minting them from the requester's own
-//! message would make the request the policy.
+//! It does not decide what a sender may spend. [`caps`] reports what the sender
+//! *asked for*; caps and scope arrive on a [`supervisor::RunRequest`] already
+//! clamped by operator policy. Letting the request be the policy is exactly the
+//! failure the two layers are separated to prevent.
 
+pub mod caps;
 pub mod event;
 pub mod supervisor;
 
+pub use caps::{
+    parse_caps, usd_to_micro, CapsParse, CapsRefusal, Disclosure, Question, RequestedCaps,
+    SenderTimezone, TimezoneSource, UNLIMITED_MICRO_USD,
+};
 pub use event::{RunEvent, RunRecordSummary, StreamStats};
 pub use supervisor::{RunOutcome, RunRequest, SpawnError, Supervisor, Termination};
 
@@ -230,6 +237,7 @@ mod tests {
             // 0 disables our timeout, so a test that is not about timing cannot
             // fail on a slow machine.
             run_timeout_seconds: 0,
+            default_timezone: String::new(),
         }
     }
 

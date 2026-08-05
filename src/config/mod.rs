@@ -485,6 +485,18 @@ pub struct QuarryConfig {
     /// responding to its own caps.
     #[serde(default = "default_quarry_run_timeout_seconds")]
     pub run_timeout_seconds: u64,
+
+    /// IANA timezone deadlines resolve in when a sender has no stored preference
+    /// (env: `QUARRY_DEFAULT_TIMEZONE`). Empty falls back to UTC.
+    ///
+    /// A deadline is a **price control**, not a scheduling field — quarry's
+    /// `Deferrable()` turns slack into cheaper inference — so "by tonight"
+    /// resolved in the wrong zone buys the wrong amount of compute. Set this to
+    /// where your users actually are; UTC is the honest last resort, not a
+    /// sensible default, and the resolved instant is always echoed to the sender
+    /// with its source so a wrong guess is visible before spend.
+    #[serde(default)]
+    pub default_timezone: String,
 }
 
 impl Default for QuarryConfig {
@@ -497,6 +509,7 @@ impl Default for QuarryConfig {
             retention_max_runs: default_quarry_retention_max_runs(),
             retention_max_age_seconds: 0,
             run_timeout_seconds: default_quarry_run_timeout_seconds(),
+            default_timezone: String::new(),
         }
     }
 }
@@ -1397,6 +1410,7 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_quarry_run_timeout_seconds),
+                default_timezone: std::env::var("QUARRY_DEFAULT_TIMEZONE").unwrap_or_default(),
             },
         })
     }

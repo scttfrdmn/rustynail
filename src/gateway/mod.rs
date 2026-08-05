@@ -473,6 +473,26 @@ impl Gateway {
         Arc::clone(&self.quarry)
     }
 
+    /// The timezone a sender's deadlines resolve in, with its provenance.
+    ///
+    /// Walks the documented chain — stored preference, then `quarry.default_timezone`,
+    /// then UTC — and reports which step supplied the answer so the resolved instant
+    /// can be echoed back with an honest source. One implementation on purpose: a
+    /// second copy of this chain would eventually disagree with the disclosure the
+    /// sender is shown, which is worse than either fallback.
+    pub async fn sender_timezone(&self, user_id: &str) -> crate::quarry::SenderTimezone {
+        let stored = self.user_prefs.timezone(user_id).await;
+        let default = &self.config.quarry.default_timezone;
+        crate::quarry::SenderTimezone::resolve(
+            stored.as_deref(),
+            if default.is_empty() {
+                None
+            } else {
+                Some(default.as_str())
+            },
+        )
+    }
+
     /// Returns a sender for delivering inbound messages to this gateway.
     pub fn message_sender(&self) -> mpsc::UnboundedSender<Message> {
         self.message_tx.clone()
@@ -1431,6 +1451,47 @@ mod tests {
         let q = gw.quarry();
         assert!(!q.enabled());
         assert_eq!(q.active_runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_sender_timezone_chain_prefers_the_sender_then_the_operator_then_utc() {
+        use crate::quarry::TimezoneSource;
+
+        let mut cfg = test_config("info", None, false);
+        cfg.quarry.default_timezone = "America/Denver".to_string();
+        let gw = Gateway::new(cfg);
+
+        // Nothing stored: the operator default, reported as such.
+        let tz = gw.sender_timezone("alice").await;
+        assert_eq!(tz.tz, chrono_tz::America::Denver);
+        assert_eq!(tz.source, TimezoneSource::ConfigDefault);
+
+        // Stored preference wins, and the source says so — a deadline resolved in
+        // the sender's own zone is a different claim from one resolved in the
+        // operator's, and only the sender can tell which is right.
+        gw.user_prefs.set_timezone("alice", "Asia/Tokyo").await;
+        let tz = gw.sender_timezone("alice").await;
+        assert_eq!(tz.tz, chrono_tz::Asia::Tokyo);
+        assert_eq!(tz.source, TimezoneSource::SenderPreference);
+
+        // Another sender is unaffected.
+        let tz = gw.sender_timezone("bob").await;
+        assert_eq!(tz.tz, chrono_tz::America::Denver);
+    }
+
+    #[tokio::test]
+    async fn an_empty_default_timezone_falls_all_the_way_to_utc_and_says_so() {
+        use crate::quarry::TimezoneSource;
+
+        // An empty config string must not be handed to the parser as a zone name:
+        // it would fail, land on UTC anyway, and report ConfigDefault — claiming an
+        // operator setting that does not exist.
+        let cfg = test_config("info", None, false);
+        assert!(cfg.quarry.default_timezone.is_empty());
+        let gw = Gateway::new(cfg);
+        let tz = gw.sender_timezone("alice").await;
+        assert_eq!(tz.tz, chrono_tz::UTC);
+        assert_eq!(tz.source, TimezoneSource::UtcFallback);
     }
 
     #[tokio::test]
