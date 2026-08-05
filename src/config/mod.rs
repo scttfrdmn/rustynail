@@ -24,6 +24,9 @@ pub struct Config {
     /// Cron job scheduler configuration.
     #[serde(default)]
     pub cron: CronConfig,
+    /// quarry run supervision.
+    #[serde(default)]
+    pub quarry: QuarryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +429,78 @@ pub struct CronConfig {
     pub jobs: Vec<CronJobConfig>,
 }
 
+// ── quarry runs ───────────────────────────────────────────────────────────────
+
+/// Supervision settings for spawned `quarry` runs.
+///
+/// quarry is a **subprocess, not a library** — the gateway spawns the signed
+/// binary per run and reads its `RunEvent` stream from stdout. Two reasons: the Go
+/// and Rust twins must share one integration boundary so the comparison between
+/// them is not confounded, and a run should exist only while it is running (no
+/// resident orchestrator, zero idle cost).
+///
+/// `enabled` defaults to **false**. quarry runs spend real money, so switching
+/// them on is an explicit operator decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarryConfig {
+    /// Enable quarry run supervision (env: `QUARRY_ENABLED`).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the `quarry` binary (env: `QUARRY_BINARY_PATH`).
+    ///
+    /// Resolved and checked at spawn, not at load: a config that names a missing
+    /// binary should fail the run that needs it with a clear message rather than
+    /// refusing to start the gateway.
+    #[serde(default = "default_quarry_binary_path")]
+    pub binary_path: String,
+
+    /// Maximum runs executing at once (env: `QUARRY_MAX_CONCURRENT_RUNS`).
+    ///
+    /// Runs over the limit are **refused, not queued** — see
+    /// `quarry::supervisor::SpawnError::AtCapacity` for why.
+    #[serde(default = "default_quarry_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+
+    /// Directory holding one subdirectory per run (env: `QUARRY_RUN_RECORD_DIR`).
+    #[serde(default = "default_quarry_run_record_dir")]
+    pub run_record_dir: String,
+
+    /// Keep at most this many run directories; `0` disables the count limit
+    /// (env: `QUARRY_RETENTION_MAX_RUNS`).
+    #[serde(default = "default_quarry_retention_max_runs")]
+    pub retention_max_runs: usize,
+
+    /// Delete run directories older than this; `0` disables the age limit
+    /// (env: `QUARRY_RETENTION_MAX_AGE_SECONDS`).
+    #[serde(default)]
+    pub retention_max_age_seconds: u64,
+
+    /// Kill a run that exceeds this wall-clock budget; `0` disables
+    /// (env: `QUARRY_RUN_TIMEOUT_SECONDS`).
+    ///
+    /// Our timeout is **time truncation** and is reported as such. It is not a
+    /// substitute for quarry's own `--deadline`, which quarry can degrade against
+    /// gracefully; this one is a blunt kill for a child that has stopped
+    /// responding to its own caps.
+    #[serde(default = "default_quarry_run_timeout_seconds")]
+    pub run_timeout_seconds: u64,
+}
+
+impl Default for QuarryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary_path: default_quarry_binary_path(),
+            max_concurrent_runs: default_quarry_max_concurrent_runs(),
+            run_record_dir: default_quarry_run_record_dir(),
+            retention_max_runs: default_quarry_retention_max_runs(),
+            retention_max_age_seconds: 0,
+            run_timeout_seconds: default_quarry_run_timeout_seconds(),
+        }
+    }
+}
+
 // ── MCP servers ───────────────────────────────────────────────────────────────
 
 /// Configuration for one MCP server connection.
@@ -787,6 +862,26 @@ fn default_log_level() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_quarry_binary_path() -> String {
+    "quarry".to_string()
+}
+
+fn default_quarry_max_concurrent_runs() -> usize {
+    2
+}
+
+fn default_quarry_run_record_dir() -> String {
+    "quarry-runs".to_string()
+}
+
+fn default_quarry_retention_max_runs() -> usize {
+    50
+}
+
+fn default_quarry_run_timeout_seconds() -> u64 {
+    900 // 15 minutes
 }
 
 fn default_llm_provider() -> String {
@@ -1277,6 +1372,32 @@ impl Config {
                 path: std::env::var("AUDIT_PATH").unwrap_or_default(),
             },
             cron: CronConfig::default(),
+            quarry: QuarryConfig {
+                enabled: std::env::var("QUARRY_ENABLED")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(false),
+                binary_path: std::env::var("QUARRY_BINARY_PATH")
+                    .unwrap_or_else(|_| default_quarry_binary_path()),
+                max_concurrent_runs: std::env::var("QUARRY_MAX_CONCURRENT_RUNS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_quarry_max_concurrent_runs),
+                run_record_dir: std::env::var("QUARRY_RUN_RECORD_DIR")
+                    .unwrap_or_else(|_| default_quarry_run_record_dir()),
+                retention_max_runs: std::env::var("QUARRY_RETENTION_MAX_RUNS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_quarry_retention_max_runs),
+                retention_max_age_seconds: std::env::var("QUARRY_RETENTION_MAX_AGE_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                run_timeout_seconds: std::env::var("QUARRY_RUN_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(default_quarry_run_timeout_seconds),
+            },
         })
     }
 }
