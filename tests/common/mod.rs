@@ -56,6 +56,7 @@ pub fn make_test_state_stub() -> AppState {
             rate_limit: RateLimitConfig::default(),
             audit_enabled: false,
             audit_path: String::new(),
+            quarry_policy: rustynail::config::QuarryPolicyConfig::default(),
         })),
         skills_config: SkillsConfig::default(),
         cron_jobs: Vec::new(),
@@ -70,6 +71,7 @@ fn default_hot_config() -> Arc<RwLock<HotConfig>> {
         rate_limit: RateLimitConfig::default(),
         audit_enabled: false,
         audit_path: String::new(),
+        quarry_policy: rustynail::config::QuarryPolicyConfig::default(),
     }))
 }
 

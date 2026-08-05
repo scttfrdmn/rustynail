@@ -580,6 +580,7 @@ mod tests {
                 rate_limit: RateLimitConfig::default(),
                 audit_enabled: false,
                 audit_path: String::new(),
+                quarry_policy: crate::config::QuarryPolicyConfig::default(),
             })),
             skills_config: SkillsConfig::default(),
             cron_jobs: Vec::new(),

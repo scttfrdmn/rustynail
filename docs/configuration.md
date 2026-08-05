@@ -547,6 +547,27 @@ quarry:
   retention_max_age_seconds: 0
   run_timeout_seconds: 900
   default_timezone: America/New_York
+  policy:
+    default:
+      allowed_denominations: [spend, due]
+      max_spend_micro_usd: 1000000      # $1.00
+      default_spend_micro_usd: 250000   # $0.25
+      on_over_limit: reduce
+    channels:
+      discord-1:
+        allowed_denominations: [spend, latency, due]
+        max_spend_micro_usd: 5000000
+        default_spend_micro_usd: 1000000
+        max_latency_seconds: 1800
+        on_over_limit: reduce
+        scope_tags:
+          tenant: engineering
+    senders:
+      alice:
+        allowed_denominations: [spend, latency, due]
+        max_spend_micro_usd: 50000000
+        allow_unlimited: false
+        on_over_limit: refuse
 ```
 
 | Field | Env var | Default | Description |
@@ -559,6 +580,7 @@ quarry:
 | `retention_max_age_seconds` | `QUARRY_RETENTION_MAX_AGE_SECONDS` | `0` | Delete run directories older than this. `0` disables |
 | `run_timeout_seconds` | `QUARRY_RUN_TIMEOUT_SECONDS` | `900` | Kill a run after this long. `0` disables |
 | `default_timezone` | `QUARRY_DEFAULT_TIMEZONE` | — | IANA zone deadlines resolve in when a sender has no stored preference. Empty = UTC |
+| `policy` | — (file only) | empty | Who may run quarry, with what caps, in what scope. **Empty means nobody may run.** See below |
 
 ### The child's environment is constructed, not inherited
 
@@ -670,6 +692,128 @@ Two things are disclosed rather than done quietly:
   only be honoured as an equivalent `latency` — which forfeits `Deferrable()` and
   the cheap path with it. The substitution is reported to the sender rather than
   performed silently.
+
+### `quarry.policy` — what a sender is *allowed*
+
+What a sender **asks for** and what they **get** are separate decisions. The
+section above is the first; `quarry.policy` is the second. A sender who writes
+"spend up to $500" gets whatever policy permits, and is told so before any money
+moves.
+
+`policy` is **file-only**. A nested per-sender cap table cannot be expressed as one
+environment variable, and flattening it into a delimited string would reintroduce
+exactly the parsing this feature's security argument depends on avoiding.
+
+#### Default-deny
+
+An absent or empty `policy` means **nobody may run quarry**. A missing config is
+never read as "unlimited"; the failure mode of the opposite default is an unbounded
+spend on a fresh install.
+
+#### Precedence: most specific wins, and entries are not merged
+
+`senders[<sender_id>]`, else `channels[<channel_id>]`, else `default`. The matching
+entry is used **whole** — fields are not inherited from a broader level.
+
+That is deliberate. If levels merged, a channel entry with `allow_unlimited: false`
+would silently stop applying the moment a sender override set an unrelated field,
+because the override's own `false` default is indistinguishable from "not
+specified". Taking an entry whole means each override is one auditable decision.
+The cost is that an override must restate everything it wants.
+
+#### Entry fields
+
+| Field | Default | Description |
+|---|---|---|
+| `allowed_denominations` | `[]` | Which of `spend`, `latency`, `due` the sender may set themselves. Empty = none; the defaults below apply |
+| `max_spend_micro_usd` | — | Largest spend cap requestable, in int64 micro-dollars. Omitted = no ceiling; `-1` = unlimited ceiling |
+| `default_spend_micro_usd` | — | Spend cap applied when the sender names none |
+| `max_latency_seconds` | — | Largest latency cap requestable |
+| `default_latency_seconds` | — | Latency cap applied when the sender names none |
+| `allow_unlimited` | `false` | Permit an explicitly unlimited spend cap |
+| `on_over_limit` | `refuse` | `reduce` (grant the maximum, disclose it) or `refuse`. **Anything unrecognised refuses**, so a typo cannot land on the permissive branch |
+| `scope_tags` | `{}` | Extra scope tags every matching run carries. Cannot override `user` or `channel` |
+
+Costs are **int64 micro-dollars** throughout — `$1.00` is `1000000`. `-1` means
+unlimited and is distinct from `0`, which is a zero budget. Note that a policy which
+grants no cap in any denomination is refused as a misconfiguration rather than
+treated as unlimited: quarry cannot plan without a budget.
+
+#### Being allowed to set a cap is its own permission
+
+A sender may be permitted `spend` but not `due`. That is not fussiness: a `due`
+with no `latency` is what makes a run *deferrable*, and a sender who can set their
+own `latency` can force every run onto the expensive path. A denomination the sender
+is not permitted to set is discarded, the policy default applies, and the sender is
+told — never silently dropped.
+
+#### Reduce-with-disclosure, or refuse
+
+Both outcomes appear in the plan message **before** spend. "You asked for $5, policy
+allows $1, proceeding with $1" is fine; proceeding with $1 without saying so is the
+quiet degradation quarry's P9 disclosure exists to prevent.
+
+A deadline is the one thing never clamped downward: a later deadline is a *weaker*
+constraint, and tightening it would be the opposite of what a limit is for.
+
+#### Scope: this gateway is the security boundary
+
+quarry's cache key is **scope-qualified**, not the statement hash alone. Two senders
+can pose a byte-identical sub-problem while holding different entitlements, and one's
+cached answer may derive from documents the other cannot see. So **getting the scope
+wrong is a cross-tenant data leak**, not a misconfiguration.
+
+quarry treats tags as opaque — it hashes them and compares them, nothing more. In
+quarry's own reference deployment the real enforcement is AWS IAM and quarry's local
+check is explicitly "a fast-fail courtesy, not the security boundary." **There is no
+IAM here.** Nothing downstream catches a sloppy scope, so the gateway is defensive
+about it:
+
+- Scope is minted from **verified channel identity only** — `user` and `channel`
+  from the channel adapter. Nothing in the message body reaches it, so a sender
+  cannot widen their own scope by writing scope-shaped text.
+- `scope_tags` in a policy entry **cannot override `user` or `channel`**. An entry
+  that could would let one policy entry address another sender's cache namespace.
+- Tag keys and values may not contain `=`, `;`, or a control character. quarry's
+  `Scope.Key()` renders `k=v;` **without escaping its own separators**, so
+  `{tenant: "victim;user=alice"}` produces byte-identical output to
+  `{tenant: "victim", user: "alice"}`. Such a value is **refused**, not escaped:
+  escaping would make this gateway's cache keys disagree with quarry's, and every
+  hit would become a miss.
+- A scope must carry at least one tag. quarry's `NarrowsTo` is a subset check, so an
+  empty scope narrows to *every* scope and would pass any entitlement check.
+
+**Narrowing relation: subset-of-tags.** This matches quarry exactly. Hierarchical
+tag values are **not** supported — `{scope: "chemistry"}` does *not* narrow to
+`{scope: "chemistry/chem-101"}`, because quarry's relation is subset, not prefix.
+Adopting prefix semantics locally would make a check pass in the gateway and fail in
+quarry, and it would fail *open* in the direction of the cache. Scope values are
+opaque, flat identifiers.
+
+#### The child's only credential
+
+A quarry run calls the gateway's own `/v1/chat/completions` endpoint, which sits
+behind bearer auth. The child receives exactly two environment variables —
+`QUARRY_PROVIDER_URL` and `QUARRY_PROVIDER_TOKEN` — and nothing else. The token is
+`gateway.api_token`, read live so a rotated token reaches the next run.
+
+**With no `gateway.api_token` set, quarry runs are refused.** An absent token does
+not mean "spawn without one": it means `/v1` has no authentication at all, so there
+is no credential to hand over and nothing keeping anything else on the host out
+either.
+
+#### Audit and reload
+
+Every decision is written to the audit log as `quarry_policy_decision` — grants as
+well as refusals, with the requested and granted spend, which precedence level
+matched, any adjustments, and the resolved scope key. Grants are logged because
+"what was this run allowed to spend" is the first question asked after an unexpected
+bill, and refusals alone cannot answer it.
+
+`policy` is **SIGHUP-reloadable**. A reload applies to the next run; runs already in
+flight keep the caps they started with, since those were handed to a child process
+and cannot be revised. An operator who had to restart the gateway to tighten a cap
+would not tighten it.
 
 ## `otel.*`
 
