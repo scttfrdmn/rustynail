@@ -452,8 +452,13 @@ impl Gateway {
 
         let auto_route_attachments = config.gateway.auto_route_attachments;
 
-        let quarry =
-            Arc::new(QuarrySupervisor::new(config.quarry.clone()).with_audit(audit.clone()));
+        // The gateway's own HTTP port is what quarry's manifest must declare as its
+        // sole egress target, and the supervisor cannot check a port it was not told.
+        let quarry = Arc::new(
+            QuarrySupervisor::new(config.quarry.clone())
+                .with_gateway_port(config.gateway.http_port)
+                .with_audit(audit.clone()),
+        );
         let quarry_approvals = Arc::new(ApprovalRegistry::new().with_audit(audit.clone()));
         if config.quarry.enabled {
             info!(

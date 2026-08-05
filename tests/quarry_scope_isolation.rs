@@ -122,7 +122,23 @@ exit 0
             default_timezone: String::new(),
             approval_timeout_seconds: 300,
             policy: rustynail::config::QuarryPolicyConfig::default(),
+            // Signatures off (no signed fake exists), manifest check on. These runs
+            // pass through the real verification gate, not around it.
+            verification: rustynail::quarry::verify::development_config(),
         }
+    }
+
+    /// A supervisor over this fake, with its manifest written and the gate wired.
+    fn supervisor(&self, runs_dir: &Path) -> Supervisor {
+        let cfg = self.config(runs_dir);
+        let mut manifest = self.path.as_os_str().to_os_string();
+        manifest.push(".manifest.json");
+        std::fs::write(
+            manifest,
+            rustynail::quarry::verify::development_manifest_json(GATEWAY_PORT, &cfg.run_record_dir),
+        )
+        .expect("write fake manifest");
+        Supervisor::new(cfg).with_gateway_port(GATEWAY_PORT)
     }
 
     /// Every cache line written so far, for diagnostics on failure.
@@ -130,6 +146,9 @@ exit 0
         std::fs::read_to_string(&self.cache).unwrap_or_default()
     }
 }
+
+/// The port the fake's manifest declares as its sole egress target.
+const GATEWAY_PORT: u16 = 8080;
 
 /// The statement both senders pose. Byte-identical on purpose — quarry hashes the
 /// trimmed statement, so identical text is what makes the scope the only thing
@@ -171,7 +190,7 @@ fn model_calls(outcome: &rustynail::quarry::RunOutcome) -> usize {
 async fn a_repeat_from_the_same_sender_is_served_from_cache() {
     let fake = CachingQuarry::build();
     let runs = tempfile::tempdir().unwrap();
-    let s = Supervisor::new(fake.config(runs.path()));
+    let s = fake.supervisor(runs.path());
 
     let first = s
         .run(request_for("alice", "discord-1"), None, None)
@@ -215,7 +234,7 @@ async fn a_repeat_from_the_same_sender_is_served_from_cache() {
 async fn a_second_sender_is_not_served_the_first_senders_answer() {
     let fake = CachingQuarry::build();
     let runs = tempfile::tempdir().unwrap();
-    let s = Supervisor::new(fake.config(runs.path()));
+    let s = fake.supervisor(runs.path());
 
     let alice = s
         .run(request_for("alice", "discord-1"), None, None)
@@ -252,7 +271,7 @@ async fn a_second_sender_is_not_served_the_first_senders_answer() {
 async fn the_same_user_on_a_different_channel_is_a_different_scope() {
     let fake = CachingQuarry::build();
     let runs = tempfile::tempdir().unwrap();
-    let s = Supervisor::new(fake.config(runs.path()));
+    let s = fake.supervisor(runs.path());
 
     let discord = s
         .run(request_for("alice", "discord-1"), None, None)
@@ -282,7 +301,7 @@ async fn the_same_user_on_a_different_channel_is_a_different_scope() {
 async fn a_message_that_tries_to_forge_a_scope_gets_its_own_namespace() {
     let fake = CachingQuarry::build();
     let runs = tempfile::tempdir().unwrap();
-    let s = Supervisor::new(fake.config(runs.path()));
+    let s = fake.supervisor(runs.path());
 
     let alice = s
         .run(request_for("alice", "discord-1"), None, None)

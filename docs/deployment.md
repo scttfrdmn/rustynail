@@ -225,6 +225,24 @@ Complete list of all environment variables and their config path equivalents.
 | `WEBCHAT_WELCOME_MESSAGE` | `channels.webchat.welcome_message` | no | — |
 | `ANTHROPIC_API_BASE` | `agents.api_base` | no | — |
 | `AWS_REGION` | `agents.aws_region` | if Bedrock | `us-east-1` |
+| `QUARRY_ENABLED` | `quarry.enabled` | no | `false` |
+| `QUARRY_BINARY_PATH` | `quarry.binary_path` | if quarry | `quarry` |
+| `QUARRY_MAX_CONCURRENT_RUNS` | `quarry.max_concurrent_runs` | no | `2` |
+| `QUARRY_RUN_RECORD_DIR` | `quarry.run_record_dir` | no | `quarry-runs` |
+| `QUARRY_RETENTION_MAX_RUNS` | `quarry.retention_max_runs` | no | `50` |
+| `QUARRY_RETENTION_MAX_AGE_SECONDS` | `quarry.retention_max_age_seconds` | no | `0` |
+| `QUARRY_RUN_TIMEOUT_SECONDS` | `quarry.run_timeout_seconds` | no | `900` |
+| `QUARRY_DEFAULT_TIMEZONE` | `quarry.default_timezone` | no | UTC |
+| `QUARRY_APPROVAL_TIMEOUT_SECONDS` | `quarry.approval_timeout_seconds` | no | `300` |
+| `QUARRY_VERIFY_ENABLED` | `quarry.verification.enabled` | no | `true` |
+| `QUARRY_VERIFY_IDENTITY` | `quarry.verification.expected_identity` | if verifying | — |
+| `QUARRY_VERIFY_ISSUER` | `quarry.verification.expected_issuer` | if verifying | — |
+| `QUARRY_VERIFY_COSIGN_PATH` | `quarry.verification.cosign_path` | no | `cosign` |
+| `QUARRY_VERIFY_ALLOW_WRITABLE_BINARY` | `quarry.verification.allow_writable_binary` | no | `false` |
+| `QUARRY_VERIFY_MANIFEST_PATH` | `quarry.verification.manifest_path` | no | `<binary_path>.manifest.json` |
+
+`quarry.policy` is file-only — there is no env equivalent, and an empty policy means
+nobody may run quarry.
 
 ## Health Checks & Kubernetes Probes
 
@@ -320,6 +338,120 @@ kubectl exec -it <pod> -- kill -HUP 1
 kubectl rollout restart deployment/rustynail
 ```
 
+## Deploying quarry alongside the gateway
+
+quarry is a **separate binary** the gateway spawns, not a library it links. If
+`quarry.enabled` is `false` (the default) none of this applies — no binary is
+spawned and nothing needs verifying.
+
+### 1. Obtain the binary
+
+Take a **release artifact**, not a `go build` of `main`. Verification is against the
+release workflow's signing identity, so a locally-built binary cannot pass it — by
+design.
+
+```bash
+VERSION=v0.4.0   # whichever release you intend to run
+gh release download "$VERSION" --repo scttfrdmn/quarry \
+  --pattern 'quarry_*_linux_amd64*'
+```
+
+### 2. Verify it before you install it
+
+Verify by hand once, at install time, so a failure is something you see now rather
+than a refused run at 3am. This is the same check the gateway makes at every spawn.
+
+```bash
+cosign verify-blob \
+  --certificate-identity-regexp \
+    'https://github.com/scttfrdmn/quarry/\.github/workflows/release\.yml@refs/tags/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --bundle quarry.bundle \
+  quarry
+```
+
+Confirm the identity in the output is the quarry release workflow. A signature that
+verifies but names a different identity is not the binary you asked for — that is
+the case identity constraints exist to catch, and it is why `--certificate-identity-regexp`
+is not optional.
+
+### 3. Install it where the gateway cannot write to it
+
+```bash
+sudo install -o root -g root -m 0555 quarry /usr/local/bin/quarry
+sudo chown root:root /usr/local/bin      # the *directory* matters too
+```
+
+Both the file **and its containing directory** must be unwritable by the gateway's
+user. A writable directory lets the binary be replaced between the hash and the
+`execve`, which is the same TOCTOU window as a writable file. The gateway refuses
+either by default; `allow_writable_binary: true` downgrades both refusals to a
+per-spawn warning and should not be set in production.
+
+> **Residual window.** Even with both unwritable, a gap remains between hashing the
+> file and executing it: closing it entirely needs `fexecve` against the same
+> descriptor that was hashed, which the async process API in use cannot express and
+> whose portable `/proc/self/fd` form does not exist on macOS. Root-owned, `0555`,
+> in a root-owned directory is what narrows it from the other end.
+
+### 4. Install the capability manifest
+
+```bash
+sudo install -o root -g root -m 0444 \
+  quarry.manifest.json /usr/local/bin/quarry.manifest.json
+```
+
+The manifest must declare exactly this gateway's `http_port` for egress and exactly
+its `run_record_dir` as writable — see
+[configuration.md](configuration.md#what-the-manifest-must-say). A port mismatch
+after you move the gateway to a new port presents as `manifest_rejected`, not as a
+connection error.
+
+### 5. Configure and confirm
+
+```yaml
+quarry:
+  enabled: true
+  binary_path: /usr/local/bin/quarry
+  run_record_dir: /var/lib/rustynail/quarry-runs
+  verification:
+    enabled: true
+    expected_identity: "https://github.com/scttfrdmn/quarry/.github/workflows/release.yml@refs/tags/*"
+    expected_issuer: "https://token.actions.githubusercontent.com"
+    cosign_path: /usr/local/bin/cosign
+```
+
+```bash
+rustynail config validate
+```
+
+**Read that output before you rely on it.** The cosign mechanism the spawn gate calls
+into is tracked as [#103](https://github.com/scttfrdmn/rustynail/issues/103) and is
+not implemented yet, so with verification on, `config validate` reports that every
+run will be refused and exits non-zero. That is the fail-closed default working as
+intended. Until #103 lands your options are: leave `quarry.enabled: false`, or accept
+unverified runs with `verification.enabled: false` and a manifest sidecar in place.
+
+### Reading a refusal
+
+Every refusal is logged with the failing check named and audited as
+`quarry_verification_refused` with a `reason` field. The message the sender receives
+says only that the capability is unavailable — no path, digest, identity, or config
+key — so the log and the audit trail are where the reason lives.
+
+| `reason` | What to fix |
+|---|---|
+| `mechanism_unavailable` | No verifier installed (#103). Not a misconfiguration on your side |
+| `identity_not_configured` | Set `expected_identity` and `expected_issuer` |
+| `unsigned` | The artifact has no signature — likely a locally-built binary |
+| `wrong_identity` / `wrong_issuer` | Signed, but not by the quarry release workflow. **Investigate before overriding anything** |
+| `cosign_unavailable` | `cosign_path` does not resolve to an executable |
+| `transparency_log_unreachable` | Network or Rekor outage. Refused rather than proceeding unverified |
+| `writable_binary` / `writable_binary_dir` | Re-do step 3 |
+| `manifest_rejected` | The manifest declares something other than this gateway's port and run-record directory |
+| `manifest_unparseable` | Missing sidecar (development mode) or malformed JSON |
+| `binary_missing` | `binary_path` does not resolve |
+
 ## Production Checklist
 
 Before going live, verify:
@@ -335,3 +467,7 @@ Before going live, verify:
 - [ ] Liveness and readiness probes configured in your orchestrator
 - [ ] Prometheus scrape configured and Grafana dashboard imported
 - [ ] Image pinned to a specific version tag, not `latest`
+- [ ] If `quarry.enabled: true` — `rustynail config validate` shows quarry
+      verification in the state you intend, `verification.enabled` is **not** `false`,
+      `allow_writable_binary` is **not** set, and the binary and its directory are
+      root-owned and unwritable by the gateway's user

@@ -520,6 +520,14 @@ pub struct QuarryConfig {
     /// Empty means **nobody may run**. See [`QuarryPolicyConfig`].
     #[serde(default)]
     pub policy: QuarryPolicyConfig,
+
+    /// Signed-binary verification at the spawn path.
+    ///
+    /// **Defaults to enabled**, unlike `enabled` above. The two defaults point
+    /// opposite ways on purpose: quarry is off until an operator asks for it, and
+    /// once asked for, it is verified until an operator says otherwise.
+    #[serde(default)]
+    pub verification: QuarryVerificationConfig,
 }
 
 impl QuarryConfig {
@@ -550,6 +558,91 @@ impl Default for QuarryConfig {
             default_timezone: String::new(),
             approval_timeout_seconds: default_quarry_approval_timeout_seconds(),
             policy: QuarryPolicyConfig::default(),
+            verification: QuarryVerificationConfig::default(),
+        }
+    }
+}
+
+// ── quarry verification ───────────────────────────────────────────────────────
+
+/// Signed-binary verification for the quarry subprocess.
+///
+/// quarry is a signed artifact of the marketplace: the binary is cosign-verified
+/// before spawn, and its capability manifest declares exactly two things — localhost
+/// egress to this gateway, and one writable run-record directory. See
+/// `crate::quarry::verify` for the mechanism boundary and the fail-closed reasoning.
+///
+/// **`enabled` defaults to `true`.** An operator who writes no `verification` block
+/// gets the safe behaviour. Note that the signature *mechanism* is not yet
+/// implemented in this build (it belongs to the signed-skills work, issue #103), so
+/// the honest consequence of the safe default is that quarry runs are refused until
+/// either the mechanism lands or an operator sets `enabled: false` for development.
+/// That is the fail-closed contract working, not a bug: a control that let runs
+/// through because its verifier was missing would be no control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuarryVerificationConfig {
+    /// Verify the binary's signature before spawn (env: `QUARRY_VERIFY_ENABLED`).
+    ///
+    /// `false` is the **development escape hatch**. It skips the signature check
+    /// only; the manifest capability check still applies, because provenance and
+    /// sandboxing are separable and only the first is a development convenience. It
+    /// also logs a warning **on every spawn** rather than once at startup — a
+    /// long-running gateway that warned only at boot is a gateway nobody knows is
+    /// unverified.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Expected certificate subject identity, as a regexp
+    /// (env: `QUARRY_VERIFY_IDENTITY`).
+    ///
+    /// Maps to cosign's `--certificate-identity-regexp`. **Required when `enabled`.**
+    /// An empty value refuses every spawn rather than verifying unconstrained: a
+    /// signature that merely exists proves someone signed something, and an
+    /// unconstrained check is worse than none because it succeeds.
+    #[serde(default)]
+    pub expected_identity: String,
+
+    /// Expected OIDC issuer (env: `QUARRY_VERIFY_ISSUER`).
+    ///
+    /// Maps to cosign's `--certificate-oidc-issuer`. **Required when `enabled`**, for
+    /// the same reason as `expected_identity`. For a GitHub Actions release this is
+    /// `https://token.actions.githubusercontent.com`.
+    #[serde(default)]
+    pub expected_issuer: String,
+
+    /// Path to the cosign binary (env: `QUARRY_VERIFY_COSIGN_PATH`).
+    #[serde(default = "default_cosign_path")]
+    pub cosign_path: String,
+
+    /// Proceed even when the binary or its directory is writable by this process
+    /// (env: `QUARRY_VERIFY_ALLOW_WRITABLE_BINARY`).
+    ///
+    /// A writable path is a TOCTOU window: the digest that was verified need not be
+    /// the digest that executes. Off by default, and when on it warns on every spawn
+    /// — an accepted risk is re-stated because the operator who accepted it is often
+    /// not the one reading the logs a year later.
+    #[serde(default)]
+    pub allow_writable_binary: bool,
+
+    /// Where to read the capability manifest when `enabled` is `false`
+    /// (env: `QUARRY_VERIFY_MANIFEST_PATH`).
+    ///
+    /// Empty means `<binary_path>.manifest.json`. **Development mode only.** The
+    /// verified path takes the manifest from the signed material and never from a
+    /// sidecar, because an unsigned manifest is a manifest an attacker writes.
+    #[serde(default)]
+    pub manifest_path: String,
+}
+
+impl Default for QuarryVerificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            expected_identity: String::new(),
+            expected_issuer: String::new(),
+            cosign_path: default_cosign_path(),
+            allow_writable_binary: false,
+            manifest_path: String::new(),
         }
     }
 }
@@ -1035,6 +1128,10 @@ pub const MIN_APPROVAL_TIMEOUT_SECONDS: u64 = 15;
 
 fn default_quarry_approval_timeout_seconds() -> u64 {
     300 // 5 minutes: long enough to read a plan, short enough not to pin a slot
+}
+
+fn default_cosign_path() -> String {
+    "cosign".to_string()
 }
 
 fn default_llm_provider() -> String {
@@ -1560,6 +1657,25 @@ impl Config {
                 // not an omission: there is no env var that could safely express a
                 // nested per-sender cap table.
                 policy: QuarryPolicyConfig::default(),
+                verification: QuarryVerificationConfig {
+                    // `unwrap_or(true)`, not `unwrap_or(false)`: an unset variable
+                    // and an unparseable one both mean verification stays on. The
+                    // opposite would let `QUARRY_VERIFY_ENABLED=yes` — which does not
+                    // parse as a bool — silently disable a security control.
+                    enabled: std::env::var("QUARRY_VERIFY_ENABLED")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(true),
+                    expected_identity: std::env::var("QUARRY_VERIFY_IDENTITY").unwrap_or_default(),
+                    expected_issuer: std::env::var("QUARRY_VERIFY_ISSUER").unwrap_or_default(),
+                    cosign_path: std::env::var("QUARRY_VERIFY_COSIGN_PATH")
+                        .unwrap_or_else(|_| default_cosign_path()),
+                    allow_writable_binary: std::env::var("QUARRY_VERIFY_ALLOW_WRITABLE_BINARY")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(false),
+                    manifest_path: std::env::var("QUARRY_VERIFY_MANIFEST_PATH").unwrap_or_default(),
+                },
             },
         })
     }

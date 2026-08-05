@@ -96,6 +96,27 @@ exit 0
             .map(|s| s.lines().count())
             .unwrap_or(0)
     }
+
+    /// Write the capability manifest the verification gate reads in development mode.
+    ///
+    /// These tests spawn the fake through the **real** `SpawnGate` rather than around
+    /// it, so a change that breaks verification breaks them too. `development_config`
+    /// waives only the signature check (there is no signed shell script to produce)
+    /// and the writable-path check (a temp dir is writable by definition); the
+    /// capability manifest is still parsed and still checked, which is why it has to
+    /// exist here — and why the declared port must be the gateway's real one.
+    fn write_manifest(&self, gateway_port: u16) {
+        let mut manifest = self.path.as_os_str().to_os_string();
+        manifest.push(".manifest.json");
+        std::fs::write(
+            manifest,
+            rustynail::quarry::verify::development_manifest_json(
+                gateway_port,
+                &self.runs_dir.display().to_string(),
+            ),
+        )
+        .expect("write fake manifest");
+    }
 }
 
 // ── Gateway under test ────────────────────────────────────────────────────────
@@ -135,6 +156,11 @@ async fn gateway(
     config.quarry.enabled = true;
     config.quarry.binary_path = fake.path.display().to_string();
     config.quarry.run_record_dir = fake.runs_dir.display().to_string();
+    // Signatures off, manifest check on — and the manifest written to match the port
+    // the gateway will actually pass to the gate, which is `gateway.http_port` from
+    // the baseline config above.
+    config.quarry.verification = rustynail::quarry::verify::development_config();
+    fake.write_manifest(config.gateway.http_port);
     config.quarry.policy.default = Some(QuarryPolicyEntry {
         allowed_denominations: vec!["spend".into()],
         max_spend_micro_usd: Some(5_000_000),

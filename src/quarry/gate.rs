@@ -262,15 +262,32 @@ mod tests {
             max_concurrent_runs: 4,
             run_record_dir: dir.path().join("runs").display().to_string(),
             run_timeout_seconds: 30,
+            // Signatures off (there is no signed shim), manifest check on. The shim is
+            // spawned through the real verification gate, so these tests would notice
+            // if the gate stopped letting a legitimate run through.
+            verification: crate::quarry::verify::development_config(),
             ..QuarryConfig::default()
         };
+        let mut manifest = shim.as_os_str().to_os_string();
+        manifest.push(".manifest.json");
+        std::fs::write(
+            manifest,
+            crate::quarry::verify::development_manifest_json(
+                HARNESS_GATEWAY_PORT,
+                &config.run_record_dir,
+            ),
+        )
+        .expect("write shim manifest");
 
         Harness {
             _dir: dir,
-            supervisor: Arc::new(Supervisor::new(config)),
+            supervisor: Arc::new(Supervisor::new(config).with_gateway_port(HARNESS_GATEWAY_PORT)),
             invocations,
         }
     }
+
+    /// The port the harness manifest declares as its sole egress target.
+    const HARNESS_GATEWAY_PORT: u16 = 8080;
 
     impl Harness {
         /// How many times a quarry child was started.

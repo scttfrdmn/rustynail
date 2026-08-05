@@ -583,6 +583,90 @@ quarry:
 | `default_timezone` | `QUARRY_DEFAULT_TIMEZONE` | — | IANA zone deadlines resolve in when a sender has no stored preference. Empty = UTC |
 | `approval_timeout_seconds` | `QUARRY_APPROVAL_TIMEOUT_SECONDS` | `300` | How long a sender has to approve a plan. **Expiry cancels at zero spend.** Values below `15` are clamped up; `0` does **not** disable the gate |
 | `policy` | — (file only) | empty | Who may run quarry, with what caps, in what scope. **Empty means nobody may run.** See below |
+| `verification` | — (see below) | verification **on** | Signed-binary and capability-manifest checks at spawn |
+
+### `quarry.verification` — the spawn gate
+
+```yaml
+quarry:
+  verification:
+    enabled: true
+    expected_identity: "https://github.com/scttfrdmn/quarry/.github/workflows/release.yml@refs/tags/*"
+    expected_issuer: "https://token.actions.githubusercontent.com"
+    cosign_path: cosign
+    allow_writable_binary: false
+    manifest_path: ""      # development only; empty = <binary_path>.manifest.json
+```
+
+| Field | Env var | Default | Description |
+|-------|---------|---------|-------------|
+| `enabled` | `QUARRY_VERIFY_ENABLED` | `true` | Check the binary's signature before spawn. `false` is the **development escape hatch** — it skips the signature only |
+| `expected_identity` | `QUARRY_VERIFY_IDENTITY` | — | cosign `--certificate-identity-regexp`. **Required when enabled**; empty refuses every spawn |
+| `expected_issuer` | `QUARRY_VERIFY_ISSUER` | — | cosign `--certificate-oidc-issuer`. **Required when enabled** |
+| `cosign_path` | `QUARRY_VERIFY_COSIGN_PATH` | `cosign` | Path to the cosign binary, or a name on `PATH` |
+| `allow_writable_binary` | `QUARRY_VERIFY_ALLOW_WRITABLE_BINARY` | `false` | Proceed even when the binary or its directory is writable by the gateway. Warns on **every** spawn |
+| `manifest_path` | `QUARRY_VERIFY_MANIFEST_PATH` | — | Where to read the capability manifest when `enabled` is `false`. Empty = `<binary_path>.manifest.json` |
+
+The two `enabled` defaults point in opposite directions on purpose: `quarry.enabled`
+is `false` because a run spends real money, and `quarry.verification.enabled` is
+`true` because once you have asked for runs, you have asked for verified ones.
+
+`QUARRY_VERIFY_ENABLED` parses as a bool and **anything unparseable leaves
+verification on**. `QUARRY_VERIFY_ENABLED=yes` does not disable it — the opposite
+reading would let a typo silently switch off a security control.
+
+#### It refuses everything today, and that is the control working
+
+The cosign mechanism this gate calls into is tracked as
+[#103](https://github.com/scttfrdmn/rustynail/issues/103) and is **not implemented**.
+So the shipped default — `quarry.enabled: true` with verification on — refuses every
+spawn with `mechanism_unavailable`. That is fail-closed behaviour, not a stub: the
+alternative, defaulting to `false`, is a deployment that silently runs unverified
+binaries because nobody changed a setting.
+
+Check which state you are in before you need it:
+
+```bash
+rustynail config validate
+```
+
+#### Identity-constrained, not signature-present
+
+A signature that merely *exists* proves someone signed something. `expected_identity`
+and `expected_issuer` are what make the check mean "signed by the quarry release
+workflow", and an empty value refuses rather than verifying unconstrained — an
+unconstrained check is worse than none, because it succeeds.
+
+#### What the manifest must say
+
+Beside the binary (or inside the signed material, when verified) is a capability
+manifest. It has to declare **exactly** quarry's contract and nothing more:
+
+```json
+{
+  "schema": "quarry-capability-manifest/1",
+  "capabilities": [
+    {"kind": "localhost-egress", "port": 8080, "host": "127.0.0.1"},
+    {"kind": "writable-dir", "path": "quarry-runs"}
+  ]
+}
+```
+
+The port must be this gateway's own `gateway.http_port`, and the directory must be
+`quarry.run_record_dir`. Any third capability, a duplicate of either, a non-loopback
+host, or an unrecognised field **refuses the spawn**. A manifest declaring more than
+this describes a binary that is not the one this host is prepared to run.
+
+Setting `enabled: false` does **not** relax the manifest check. Provenance and
+sandboxing are separable, and only the first is a development convenience.
+
+#### Verify once, spawn many — but hash every time
+
+The digest is recomputed on every spawn; only the *signature* result is cached, keyed
+by that digest. An upgraded or swapped binary has a different digest, so it
+re-verifies itself with no cache invalidation to remember. The manifest check is
+**never** cached — it re-runs each spawn against current config, so a changed
+`http_port` or `run_record_dir` is re-evaluated rather than waved through.
 
 ### The child's environment is constructed, not inherited
 
