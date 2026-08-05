@@ -341,25 +341,43 @@ Snapshot of all configured cron job statuses.
 
 ### `GET /users/:user_id/preferences`
 
-Get cross-channel routing preferences for a user.
+Get a user's stored preferences. Unset fields are omitted, and an unknown user
+returns an empty object rather than a 404 — "no preferences" and "no such user"
+are the same state here.
 
 **Response 200:**
 ```json
-{"user_id": "u1", "preferred_channel": "discord-main"}
+{"preferred_channel_id": "discord-main", "timezone": "America/New_York"}
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `preferred_channel_id` | Responses are routed here regardless of where the message arrived |
+| `timezone` | IANA zone quarry deadlines resolve in. Absent = the `quarry.default_timezone` operator setting applies, then UTC |
 
 ---
 
 ### `POST /users/:user_id/preferences`
 
-Set the preferred response channel for a user.
+Set one or more preferences. **Both fields are optional and an absent field leaves
+the stored value alone** — this is a partial update, so setting a timezone does not
+require knowing (or risk clobbering) the channel preference.
 
 **Body:**
 ```json
-{"preferred_channel": "slack-main"}
+{"preferred_channel_id": "slack-main", "timezone": "Asia/Tokyo"}
 ```
 
-**Response 200:** `{"user_id": "u1", "preferred_channel": "slack-main"}`
+`timezone` must be an IANA name from the tz database. An unrecognised name is
+rejected rather than stored: a bad zone would fall back silently at resolve time
+and move a sender's deadline — and therefore their budget — without telling them.
+
+**Response 200:** empty body.
+
+**Response 400:**
+```json
+{"error": "unknown timezone", "detail": "\"Mars/Olympus_Mons\" is not an IANA timezone name. Use a name from the tz database, e.g. \"America/New_York\"."}
+```
 
 ---
 

@@ -853,20 +853,36 @@ async fn test_responses_handler(State(state): State<AppState>) -> impl IntoRespo
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserPreferenceResponse {
     pub preferred_channel_id: Option<String>,
+    /// IANA timezone deadlines resolve in. `null` means the operator default (then
+    /// UTC) applies — see `quarry.default_timezone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
+/// A preference update. Both fields are optional, and an absent field leaves the
+/// stored value alone rather than clearing it — a PATCH shape, because a client
+/// setting a timezone should not have to know the user's channel preference to
+/// avoid destroying it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SetUserPreferenceRequest {
-    pub preferred_channel_id: String,
+    #[serde(default)]
+    pub preferred_channel_id: Option<String>,
+    /// IANA timezone name, e.g. `"America/New_York"`. Validated against the
+    /// tz database: an unrecognised name is rejected rather than stored, because a
+    /// bad zone silently falls back at resolve time and would move a sender's
+    /// deadline without telling them.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 async fn get_user_preferences(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
-    let preferred_channel_id = state.user_prefs.get(&user_id).await;
+    let prefs = state.user_prefs.all(&user_id).await;
     Json(UserPreferenceResponse {
-        preferred_channel_id,
+        preferred_channel_id: prefs.preferred_channel_id,
+        timezone: prefs.timezone,
     })
 }
 
@@ -875,11 +891,28 @@ async fn set_user_preferences(
     Path(user_id): Path<String>,
     Json(body): Json<SetUserPreferenceRequest>,
 ) -> impl IntoResponse {
-    state
-        .user_prefs
-        .set(&user_id, &body.preferred_channel_id)
-        .await;
-    StatusCode::OK
+    if let Some(tz) = &body.timezone {
+        if tz.parse::<chrono_tz::Tz>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "unknown timezone",
+                    "detail": format!(
+                        "{tz:?} is not an IANA timezone name. Use a name from the tz \
+                         database, e.g. \"America/New_York\"."
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(channel_id) = &body.preferred_channel_id {
+        state.user_prefs.set(&user_id, channel_id).await;
+    }
+    if let Some(tz) = &body.timezone {
+        state.user_prefs.set_timezone(&user_id, tz).await;
+    }
+    StatusCode::OK.into_response()
 }
 
 // ── Dashboard WebSocket handler ───────────────────────────────────────────────
@@ -1295,6 +1328,89 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["preferred_channel_id"], "whatsapp-main");
+    }
+
+    #[tokio::test]
+    async fn a_timezone_preference_round_trips_through_the_api() {
+        let state = make_state();
+        let app = create_router(state.clone(), 1_048_576, 30);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/users/alice/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"timezone":"America/New_York"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.user_prefs.timezone("alice").await.unwrap(),
+            "America/New_York"
+        );
+
+        let app = create_router(state, 1_048_576, 30);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/users/alice/preferences")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["timezone"], "America/New_York");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_timezone_is_rejected_rather_than_stored() {
+        // A bad zone name stored here would fall back silently at resolve time,
+        // moving the sender's deadline — and their budget — without telling them.
+        let state = make_state();
+        let app = create_router(state.clone(), 1_048_576, 30);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/users/alice/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"timezone":"Mars/Olympus_Mons"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.user_prefs.timezone("alice").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn setting_a_timezone_does_not_clear_the_channel_preference() {
+        let state = make_state();
+        state.user_prefs.set("alice", "whatsapp-main").await;
+        let app = create_router(state.clone(), 1_048_576, 30);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/users/alice/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"timezone":"Asia/Tokyo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.user_prefs.get("alice").await.unwrap(),
+            "whatsapp-main",
+            "an absent field must leave the stored value alone, not clear it"
+        );
     }
 
     #[tokio::test]

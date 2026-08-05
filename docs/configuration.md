@@ -546,6 +546,7 @@ quarry:
   retention_max_runs: 50
   retention_max_age_seconds: 0
   run_timeout_seconds: 900
+  default_timezone: America/New_York
 ```
 
 | Field | Env var | Default | Description |
@@ -557,6 +558,7 @@ quarry:
 | `retention_max_runs` | `QUARRY_RETENTION_MAX_RUNS` | `50` | Keep at most this many run directories. `0` disables |
 | `retention_max_age_seconds` | `QUARRY_RETENTION_MAX_AGE_SECONDS` | `0` | Delete run directories older than this. `0` disables |
 | `run_timeout_seconds` | `QUARRY_RUN_TIMEOUT_SECONDS` | `900` | Kill a run after this long. `0` disables |
+| `default_timezone` | `QUARRY_DEFAULT_TIMEZONE` | — | IANA zone deadlines resolve in when a sender has no stored preference. Empty = UTC |
 
 ### The child's environment is constructed, not inherited
 
@@ -624,6 +626,50 @@ When enabled, a background reaper runs hourly (and once at startup, since record
 left by a previous process are the most likely to be overdue). Both limits are
 independent, and with both set to `0` nothing is ever deleted — a legitimate
 choice when records are archived elsewhere.
+
+### Caps come from the sender's words; a deadline is a price
+
+A run cannot start without a cap. That is quarry's design, not a missing default:
+`Caps.Validate()` refuses an uncapped run with *"at least one cap is required
+(P9)"* because **planning is budget-conditioned** — a planner with no budget has
+nothing to plan against. So the gateway will not pick a cap on a sender's behalf.
+A message with no cap gets a question back.
+
+Exactly three denominations exist, and they are not interchangeable:
+
+| Sender writes | Denomination | Notes |
+|---|---|---|
+| `up to $5`, `5 dollars`, `USD 5` | `spend` | int64 micro-dollars, `$5` → `5000000` |
+| `within 20 minutes`, `under 90s` | `latency` | A duration |
+| `by 5pm`, `by tonight`, `by Friday` | `due` | An instant, in the **sender's** timezone |
+
+**"at most 30 agents" is not a cap.** quarry has no agent-count denomination; how
+wide to go is the planner's decision under the budget. The nearest thing is
+recursion depth, which quarry calls *"a BACKSTOP, not the design"* — a run bounded
+by depth is under-verified rather than complete. Asking for one gets a question,
+not a silently dropped constraint.
+
+**A deadline is a price control, not a scheduling field.** quarry's
+`Deferrable()` is true when a `due` is set and no `latency` is: a run that is not
+needed soon can use batch and off-peak inference, which is cheaper. This is why
+`default_timezone` matters — "by tonight" resolved in UTC for a sender in New York
+buys four hours less compute than they asked for. Set it to where your users are.
+
+The resolution chain is: the sender's stored preference (`POST
+/users/:id/preferences` with `{"timezone": "America/New_York"}`), then
+`default_timezone`, then UTC. Whichever step supplied it, the resolved instant and
+its source are echoed back to the sender **before** spend, so a wrong guess is
+visible while it is still free to correct.
+
+Two things are disclosed rather than done quietly:
+
+- **Ambiguity is asked about, not resolved.** "by 5" is two times twelve hours
+  apart; picking one would pick the sender's budget for them.
+- **`Due` has no upstream flag yet.** quarry's `cmd/quarry` sets
+  `Caps{Spend, Latency}` and nothing populates `Due`, so a deadline can currently
+  only be honoured as an equivalent `latency` — which forfeits `Deferrable()` and
+  the cheap path with it. The substitution is reported to the sender rather than
+  performed silently.
 
 ## `otel.*`
 
