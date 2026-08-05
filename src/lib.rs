@@ -5,6 +5,7 @@ pub mod config;
 pub mod cron;
 pub mod gateway;
 pub mod memory;
+pub mod quarry;
 pub mod skills;
 pub mod tools;
 pub mod types;

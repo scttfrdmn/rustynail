@@ -530,6 +530,101 @@ mcp:
 
 Misconfigured or unreachable servers are logged and skipped at startup.
 
+## `quarry.*`
+
+Hosts [quarry](https://github.com/scttfrdmn/quarry) — bounded recursive
+decomposition with verified provenance — as a gateway capability. quarry is
+spawned as a **subprocess** per run; the gateway reads its `RunEvent` stream from
+stdout and its citable record from disk.
+
+```yaml
+quarry:
+  enabled: false
+  binary_path: quarry
+  max_concurrent_runs: 2
+  run_record_dir: quarry-runs
+  retention_max_runs: 50
+  retention_max_age_seconds: 0
+  run_timeout_seconds: 900
+```
+
+| Field | Env var | Default | Description |
+|-------|---------|---------|-------------|
+| `enabled` | `QUARRY_ENABLED` | `false` | Off by default: **a quarry run spends real money** |
+| `binary_path` | `QUARRY_BINARY_PATH` | `"quarry"` | Path to the `quarry` binary, or a name on `PATH` |
+| `max_concurrent_runs` | `QUARRY_MAX_CONCURRENT_RUNS` | `2` | Concurrent runs per gateway. Over the limit is **refused, not queued** |
+| `run_record_dir` | `QUARRY_RUN_RECORD_DIR` | `"quarry-runs"` | Parent directory; each run gets its own subdirectory |
+| `retention_max_runs` | `QUARRY_RETENTION_MAX_RUNS` | `50` | Keep at most this many run directories. `0` disables |
+| `retention_max_age_seconds` | `QUARRY_RETENTION_MAX_AGE_SECONDS` | `0` | Delete run directories older than this. `0` disables |
+| `run_timeout_seconds` | `QUARRY_RUN_TIMEOUT_SECONDS` | `900` | Kill a run after this long. `0` disables |
+
+### The child's environment is constructed, not inherited
+
+A quarry child is spawned with `env_clear()` and given only the variables its
+caller explicitly puts in the request. It does **not** see `ANTHROPIC_API_KEY`,
+`DISCORD_BOT_TOKEN`, `AWS_*`, `DATABASE_URL`, or any other provider or channel
+credential — a provider key would let it bypass the gateway's metering entirely,
+and a channel token would let it post as the bot. A short list of known-sensitive
+names is additionally stripped as a backstop against a caller that builds the
+wrong map, and a stripped key is logged (by name only) as a misconfiguration.
+
+Every spawn is audited as `quarry_run_started` with an `env_keys` array: **keys
+only, never values.** That is the record an operator reads to confirm nothing
+leaked.
+
+### Refused, not queued
+
+A request over `max_concurrent_runs` is refused immediately. A queue would turn a
+concurrency limit into unbounded, undisclosed latency — and a caller's own
+deadline could expire while it waited, which would surface as time truncation of
+a run that never started.
+
+### `run_timeout_seconds` is not a substitute for quarry's own caps
+
+This timeout is a host-side backstop. When it fires, the run is reported as
+**time truncation** — never as budget degradation. The distinction matters
+because the repair differs: a caller told "priced out" raises its spend cap and
+buys nothing when what actually ran out was time. quarry's own `--cap` and
+`--deadline` are what actually bound a run; this only bounds how long the gateway
+will hold a slot.
+
+Events already emitted before a kill are kept and reported. A killed run is a
+truncated run, not a discarded one — the money was already spent, so the receipt
+has to survive.
+
+### How a run's outcome is classified
+
+| Outcome | Meaning |
+|---------|---------|
+| `completed` | Clean exit, an answer, and quarry's record shows nothing was cut short |
+| `truncated` | Clean exit with an answer, but a cap bit. `truncated_by` names which: `spend`, `latency`, or `due`. **A legitimate result** |
+| `no_answer` | quarry produced nothing affordable. Its record is still written and still citable |
+| `timed_out` | `run_timeout_seconds` fired. Time truncation |
+| `cancelled` | Cancelled mid-flight, including at shutdown. Time truncation |
+| `crashed` | Non-zero exit that is not `no_answer`. A fault, not degradation |
+| `killed_by_signal` | Terminated by a signal; the child's own error reporting never ran |
+| `stream_malformed` | The child emitted no parseable event at all — wrong binary, or a contract break |
+
+The truncation verdict is read from quarry's own record file, never inferred from
+how many events arrived: a short stream is equally consistent with a small tree, a
+crash, or a deadline. An individually unparseable **line** is skipped, recorded,
+and the run continues; a **stream** with no events at all is `stream_malformed`,
+which is a different fault and should not be retried the same way.
+
+### Shutdown
+
+In-flight runs are given up to `gateway.shutdown_timeout_seconds` to finish before
+their tasks are aborted, so a run that already spent money gets a chance to write
+its record. Anything still running when that budget expires is killed, and the
+loss is logged.
+
+### Retention
+
+When enabled, a background reaper runs hourly (and once at startup, since records
+left by a previous process are the most likely to be overdue). Both limits are
+independent, and with both set to `0` nothing is ever deleted — a legitimate
+choice when records are archived elsewhere.
+
 ## `otel.*`
 
 | Field | Env var | Default | Description |

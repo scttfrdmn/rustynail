@@ -21,11 +21,13 @@ use crate::memory::{
     InMemoryStore, MemoryStore, MemorySummarizer, PostgresStore, RedisStore, SqliteStore,
     VectorMemoryStore,
 };
+use crate::quarry::Supervisor as QuarrySupervisor;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::types::{GatewayEvent, Message};
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn, Instrument};
@@ -130,6 +132,10 @@ pub struct Gateway {
     formatter: Arc<ResponseFormatter>,
     /// Auto-route attachments to PDF/image tool prompts.
     auto_route_attachments: bool,
+    /// quarry run supervisor. Present even when `quarry.enabled` is false, so a
+    /// caller gets [`crate::quarry::SpawnError::Disabled`] — a reason — rather than
+    /// a missing capability it has to guess about.
+    quarry: Arc<QuarrySupervisor>,
 }
 
 impl Gateway {
@@ -427,6 +433,15 @@ impl Gateway {
 
         let auto_route_attachments = config.gateway.auto_route_attachments;
 
+        let quarry =
+            Arc::new(QuarrySupervisor::new(config.quarry.clone()).with_audit(audit.clone()));
+        if config.quarry.enabled {
+            info!(
+                "quarry runs enabled (binary={}, max_concurrent={})",
+                config.quarry.binary_path, config.quarry.max_concurrent_runs
+            );
+        }
+
         Self {
             config,
             channels: Arc::new(RwLock::new(Vec::new())),
@@ -449,7 +464,13 @@ impl Gateway {
             chunker,
             formatter,
             auto_route_attachments,
+            quarry,
         }
+    }
+
+    /// The quarry run supervisor.
+    pub fn quarry(&self) -> Arc<QuarrySupervisor> {
+        Arc::clone(&self.quarry)
     }
 
     /// Returns a sender for delivering inbound messages to this gateway.
@@ -913,6 +934,37 @@ impl Gateway {
             self.tasks.push(msg_task);
         }
 
+        // quarry run-record retention. Only spawned when quarry is enabled and at
+        // least one limit is set — an unconditional reaper would wake hourly forever
+        // on an installation that does not use quarry.
+        //
+        // Reaping on a timer rather than after each run, because the thing being
+        // bounded is disk over time, and a run that has just finished is the one a
+        // caller is most likely about to read.
+        if self.config.quarry.enabled
+            && (self.config.quarry.retention_max_runs > 0
+                || self.config.quarry.retention_max_age_seconds > 0)
+        {
+            let quarry = Arc::clone(&self.quarry);
+            let reaper = tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+                // The first tick fires immediately, which is wanted: a restart is
+                // when records left by a previous process are most likely overdue.
+                loop {
+                    ticker.tick().await;
+                    match quarry.reap_run_dirs().await {
+                        Ok(0) => {}
+                        Ok(n) => info!(
+                            "Reaped {n} expired quarry run director{}",
+                            if n == 1 { "y" } else { "ies" }
+                        ),
+                        Err(e) => warn!("quarry run-record retention failed: {e}"),
+                    }
+                }
+            });
+            self.tasks.push(reaper);
+        }
+
         info!("Gateway started successfully");
         Ok(())
     }
@@ -935,6 +987,33 @@ impl Gateway {
                 if let Err(e) = channel.stop().await {
                     error!("Error stopping channel {}: {}", channel.name(), e);
                 }
+            }
+        }
+
+        // quarry runs are given a bounded chance to finish before the tasks that
+        // own them are aborted. Aborting a run mid-flight kills the child and
+        // discards the record it was about to write — a run that already spent real
+        // money and had nothing to show for it. `shutdown_timeout_seconds` is the
+        // same budget the rest of shutdown works to, so a slow drain here cannot
+        // stall a deploy indefinitely.
+        //
+        // A run still in flight when the budget runs out is aborted, not waited for:
+        // `kill_on_drop` closes it out, and the supervisor reports it as
+        // cancellation — time truncation, which is exactly what a shutdown is.
+        let active = self.quarry.active_runs();
+        if active > 0 {
+            let budget = Duration::from_secs(self.config.gateway.shutdown_timeout_seconds);
+            info!("Waiting up to {budget:?} for {active} quarry run(s) to finish");
+            let deadline = tokio::time::Instant::now() + budget;
+            while self.quarry.active_runs() > 0 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let remaining = self.quarry.active_runs();
+            if remaining > 0 {
+                warn!(
+                    "{remaining} quarry run(s) still in flight at shutdown; \
+                     their children will be killed and their records lost"
+                );
             }
         }
 
@@ -1260,8 +1339,8 @@ mod tests {
     use super::*;
     use crate::config::{
         AgentsConfig, AuditConfig, ChannelsConfig, Config, CronConfig, DeduplicationConfig,
-        GatewayConfig, McpConfig, MemoryConfig, OtelConfig, RateLimitConfig, SkillsConfig,
-        ToolsConfig,
+        GatewayConfig, McpConfig, MemoryConfig, OtelConfig, QuarryConfig, RateLimitConfig,
+        SkillsConfig, ToolsConfig,
     };
 
     fn test_config(log_level: &str, api_token: Option<&str>, audit_enabled: bool) -> Config {
@@ -1306,6 +1385,7 @@ mod tests {
                 path: String::new(),
             },
             cron: CronConfig::default(),
+            quarry: QuarryConfig::default(),
         }
     }
 
@@ -1335,5 +1415,38 @@ mod tests {
         let mut hc = HotConfig::from_config(&cfg);
         let changed = hc.apply(&cfg);
         assert!(changed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn quarry_supervisor_exists_even_when_disabled() {
+        // Disabled must mean "refuses with a reason", not "capability absent". A
+        // caller that had to distinguish `None` from a refusal would have to guess
+        // whether the operator turned it off or the build lacks it.
+        let cfg = test_config("info", None, false);
+        assert!(
+            !cfg.quarry.enabled,
+            "disabled is the default: quarry spends money"
+        );
+        let gw = Gateway::new(cfg);
+        let q = gw.quarry();
+        assert!(!q.enabled());
+        assert_eq!(q.active_runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_promptly_when_no_quarry_run_is_in_flight() {
+        // The drain loop must not cost a deploy anything when there is nothing to
+        // drain — a 30-second budget polled unconditionally would add 30 seconds to
+        // every shutdown.
+        let mut cfg = test_config("info", None, false);
+        cfg.gateway.shutdown_timeout_seconds = 30;
+        let mut gw = Gateway::new(cfg);
+        let started = std::time::Instant::now();
+        gw.stop().await.expect("stop succeeds");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown waited on an empty run set: {:?}",
+            started.elapsed()
+        );
     }
 }

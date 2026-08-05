@@ -47,6 +47,44 @@ pub enum AuditEvent {
         param: Option<String>,
         success: bool,
     },
+    /// A quarry subprocess was spawned.
+    ///
+    /// `env_keys` names the variables placed in the child's environment — the
+    /// keys only, never the values. The child gets an explicitly constructed
+    /// environment rather than an inherited one, and this is the record that lets
+    /// an operator confirm no provider or channel credential leaked into it.
+    QuarryRunStarted {
+        run_id: String,
+        user_id: String,
+        channel_id: String,
+        binary_path: String,
+        env_keys: Vec<String>,
+    },
+    /// A quarry subprocess ended.
+    ///
+    /// `termination` is the classified outcome, not the raw exit code:
+    /// `completed`, `truncated`, `no_answer`, `timed_out`, `cancelled`,
+    /// `crashed`, `killed_by_signal`, or `stream_malformed`. `truncated_by` names
+    /// which cap bit — and is **absent** when nothing did, because a run that
+    /// finished within its caps has no such fact to report.
+    QuarryRunEnded {
+        run_id: String,
+        user_id: String,
+        termination: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncated_by: Option<String>,
+        events: usize,
+        bad_lines: usize,
+        cost_micro_usd: i64,
+        duration_ms: u64,
+    },
+    /// A quarry run could not be started, or failed in supervision.
+    QuarryRunFailed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        user_id: String,
+        reason: String,
+    },
 }
 
 // ── Internal record wrapper ───────────────────────────────────────────────────
