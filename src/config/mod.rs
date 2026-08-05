@@ -497,6 +497,17 @@ pub struct QuarryConfig {
     /// with its source so a wrong guess is visible before spend.
     #[serde(default)]
     pub default_timezone: String,
+
+    /// Who may run quarry, with what caps, in what scope.
+    ///
+    /// **File-only.** A nested per-sender map cannot be expressed as a single
+    /// environment variable, and flattening it into one would produce exactly the
+    /// kind of string parsing that this feature's whole security argument rests on
+    /// avoiding — see `crate::quarry::policy`.
+    ///
+    /// Empty means **nobody may run**. See [`QuarryPolicyConfig`].
+    #[serde(default)]
+    pub policy: QuarryPolicyConfig,
 }
 
 impl Default for QuarryConfig {
@@ -510,8 +521,97 @@ impl Default for QuarryConfig {
             retention_max_age_seconds: 0,
             run_timeout_seconds: default_quarry_run_timeout_seconds(),
             default_timezone: String::new(),
+            policy: QuarryPolicyConfig::default(),
         }
     }
+}
+
+// ── quarry policy ─────────────────────────────────────────────────────────────
+
+/// Which senders may start a quarry run, and under what caps.
+///
+/// **Default-deny.** An absent or empty policy means no one may run. The opposite
+/// default — a missing config meaning "unlimited" — spends real money on a fresh
+/// install, which is why `Default` here produces a config that grants nothing.
+///
+/// Resolution is **most-specific-wins with no merging**: a `senders` entry, else a
+/// `channels` entry, else `default`. An entry is taken whole. See
+/// `crate::quarry::policy::ConfigCapsPolicy::entry_for` for why merging levels
+/// would silently weaken a restrictive entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct QuarryPolicyConfig {
+    /// Applies to any sender with no channel or sender entry. `None` denies them.
+    #[serde(default)]
+    pub default: Option<QuarryPolicyEntry>,
+
+    /// Keyed by channel id. Overrides `default` for every sender on that channel.
+    #[serde(default)]
+    pub channels: std::collections::BTreeMap<String, QuarryPolicyEntry>,
+
+    /// Keyed by verified sender id. Overrides both of the above.
+    #[serde(default)]
+    pub senders: std::collections::BTreeMap<String, QuarryPolicyEntry>,
+}
+
+/// One policy entry: the caps a matching sender may use and the scope tags their
+/// runs carry.
+///
+/// Every permissive field defaults to the restrictive value, so an entry written as
+/// `{}` grants the ability to run with no cap in any denomination — which
+/// `resolve` then refuses as `no_cap_granted`, rather than treating it as
+/// unlimited.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct QuarryPolicyEntry {
+    /// Denominations the sender may set themselves: `spend`, `latency`, `due`.
+    ///
+    /// Empty means they may set none, and the defaults below apply. Being allowed
+    /// to set a cap is a distinct permission from having one: a sender who can set
+    /// their own `latency` can force every run onto the expensive path, because a
+    /// deadline without a latency is what makes a run deferrable and cheap.
+    #[serde(default)]
+    pub allowed_denominations: Vec<String>,
+
+    /// Largest spend cap the sender may request, in int64 micro-dollars.
+    /// `None` means no ceiling; `-1` means an unlimited ceiling.
+    #[serde(default)]
+    pub max_spend_micro_usd: Option<i64>,
+
+    /// Spend cap applied when the sender names none, in int64 micro-dollars.
+    #[serde(default)]
+    pub default_spend_micro_usd: Option<i64>,
+
+    /// Largest latency cap the sender may request, in seconds.
+    #[serde(default)]
+    pub max_latency_seconds: Option<u64>,
+
+    /// Latency cap applied when the sender names none, in seconds.
+    #[serde(default)]
+    pub default_latency_seconds: Option<u64>,
+
+    /// Permit an explicitly unlimited spend cap. **Defaults to false.**
+    ///
+    /// quarry apportions the root cap down the tree as it recurses, so an unlimited
+    /// root is unbounded at every node.
+    #[serde(default)]
+    pub allow_unlimited: bool,
+
+    /// What to do when a request exceeds a maximum: `reduce` (grant the maximum and
+    /// disclose it) or `refuse`.
+    ///
+    /// Anything unrecognised — including the empty string this defaults to —
+    /// refuses, so a typo cannot land on the permissive branch.
+    #[serde(default)]
+    pub on_over_limit: String,
+
+    /// Extra scope tags every matching run carries, folded into every cache key.
+    ///
+    /// `user` and `channel` are minted from verified identity and **cannot be
+    /// overridden here** — an entry that set them could address another sender's
+    /// cache namespace. Keys and values may not contain `=`, `;`, or control
+    /// characters; quarry's `Scope.Key()` does not escape its own separators, so a
+    /// value containing them can forge a different scope's key.
+    #[serde(default)]
+    pub scope_tags: std::collections::BTreeMap<String, String>,
 }
 
 // ── MCP servers ───────────────────────────────────────────────────────────────
@@ -1411,6 +1511,11 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(default_quarry_run_timeout_seconds),
                 default_timezone: std::env::var("QUARRY_DEFAULT_TIMEZONE").unwrap_or_default(),
+                // Policy is file-only, and an env-only configuration therefore
+                // grants nobody a quarry run. That is the intended default-deny,
+                // not an omission: there is no env var that could safely express a
+                // nested per-sender cap table.
+                policy: QuarryPolicyConfig::default(),
             },
         })
     }

@@ -10,7 +10,7 @@ pub mod user_prefs;
 use crate::agents::AgentManager;
 use crate::audit::{AuditEvent, AuditLogger};
 use crate::channels::Channel;
-use crate::config::{Config, RateLimitConfig, SkillsConfig};
+use crate::config::{Config, QuarryPolicyConfig, RateLimitConfig, SkillsConfig};
 use crate::cron::CronScheduler;
 use crate::gateway::chunker::MessageChunker;
 use crate::gateway::dashboard::MessageStats;
@@ -46,6 +46,14 @@ pub struct HotConfig {
     pub rate_limit: RateLimitConfig,
     pub audit_enabled: bool,
     pub audit_path: String,
+    /// Who may run quarry and under what caps.
+    ///
+    /// Hot-reloadable because the alternative is worse: an operator who has to
+    /// restart the gateway to tighten a cap will not tighten the cap. Policy is read
+    /// per run, so a reload takes effect on the next run and leaves runs already in
+    /// flight under the caps they started with — those caps were already handed to a
+    /// child process and cannot be revised from here.
+    pub quarry_policy: QuarryPolicyConfig,
 }
 
 impl HotConfig {
@@ -56,6 +64,7 @@ impl HotConfig {
             rate_limit: config.gateway.rate_limit.clone(),
             audit_enabled: config.audit.enabled,
             audit_path: config.audit.path.clone(),
+            quarry_policy: config.quarry.policy.clone(),
         }
     }
 
@@ -92,6 +101,10 @@ impl HotConfig {
         if self.audit_path != new.audit.path {
             self.audit_path = new.audit.path.clone();
             changed.push("audit.path".to_string());
+        }
+        if self.quarry_policy != new.quarry.policy {
+            self.quarry_policy = new.quarry.policy.clone();
+            changed.push("quarry.policy".to_string());
         }
 
         changed
@@ -471,6 +484,32 @@ impl Gateway {
     /// The quarry run supervisor.
     pub fn quarry(&self) -> Arc<QuarrySupervisor> {
         Arc::clone(&self.quarry)
+    }
+
+    /// Resolve what a sender may spend, and the scope their run carries.
+    ///
+    /// Built per call from the **hot config** rather than held as a field, so a
+    /// SIGHUP that tightens a cap applies to the next run without a restart. The
+    /// cost is a small clone per run, against a policy that would otherwise be
+    /// frozen at startup — a bad trade in the other direction, since an operator who
+    /// must restart to tighten a cap will not tighten it.
+    pub async fn quarry_policy(&self) -> crate::quarry::ConfigCapsPolicy {
+        let policy = self.hot_config.read().await.quarry_policy.clone();
+        crate::quarry::ConfigCapsPolicy::new(policy).with_audit(self.audit.clone())
+    }
+
+    /// The environment a quarry child receives: the localhost `/v1` endpoint and its
+    /// bearer token, and nothing else.
+    ///
+    /// The token is read from the hot config for the same reason the middleware
+    /// reads it there — a SIGHUP-rotated token must not leave the child holding the
+    /// old one and failing every call.
+    pub async fn quarry_child_env(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, crate::quarry::PolicyRefusal> {
+        let token = self.hot_config.read().await.api_token.clone();
+        let url = format!("http://127.0.0.1:{}/v1", self.config.gateway.http_port);
+        crate::quarry::policy::mint_child_env(token.as_deref(), &url)
     }
 
     /// The timezone a sender's deadlines resolve in, with its provenance.
@@ -1332,6 +1371,9 @@ pub async fn handle_message_for_test_full(
             rate_limit: rlc,
             audit_enabled: false,
             audit_path: String::new(),
+            // Default-deny: these tests are not about quarry, and an empty policy
+            // grants nobody a run.
+            quarry_policy: crate::config::QuarryPolicyConfig::default(),
         }))
     });
 
@@ -1430,6 +1472,44 @@ mod tests {
     }
 
     #[test]
+    fn a_sighup_can_tighten_a_quarry_cap_without_a_restart() {
+        // Policy has to be reloadable, because an operator who must restart the
+        // gateway to lower a spend cap will not lower it. The reload is asserted on
+        // the value, not just on the changed-field name — a `changed` entry with a
+        // stale value would look like a working reload in the logs.
+        let cfg = test_config("info", None, false);
+        let mut hc = HotConfig::from_config(&cfg);
+        assert!(
+            hc.quarry_policy.default.is_none(),
+            "a default config must grant nobody a run"
+        );
+
+        let mut new_cfg = cfg.clone();
+        new_cfg.quarry.policy.default = Some(crate::config::QuarryPolicyEntry {
+            allowed_denominations: vec!["spend".into()],
+            max_spend_micro_usd: Some(500_000),
+            ..Default::default()
+        });
+        let changed = hc.apply(&new_cfg);
+        assert!(changed.contains(&"quarry.policy".to_string()));
+        assert_eq!(
+            hc.quarry_policy
+                .default
+                .as_ref()
+                .unwrap()
+                .max_spend_micro_usd,
+            Some(500_000)
+        );
+
+        // And a reload that revokes the entry restores default-deny rather than
+        // leaving the last permissive policy in place.
+        let revoked = test_config("info", None, false);
+        let changed = hc.apply(&revoked);
+        assert!(changed.contains(&"quarry.policy".to_string()));
+        assert!(hc.quarry_policy.default.is_none());
+    }
+
+    #[test]
     fn test_hotconfig_apply_ignores_no_change() {
         let cfg = test_config("info", None, false);
         let mut hc = HotConfig::from_config(&cfg);
@@ -1492,6 +1572,72 @@ mod tests {
         let tz = gw.sender_timezone("alice").await;
         assert_eq!(tz.tz, chrono_tz::UTC);
         assert_eq!(tz.source, TimezoneSource::UtcFallback);
+    }
+
+    #[tokio::test]
+    async fn the_quarry_policy_is_read_from_the_hot_config_not_frozen_at_startup() {
+        use crate::quarry::CapsPolicy;
+
+        // Built from `hot_config` per call, so a SIGHUP that grants or tightens a
+        // policy applies to the next run. Held as a startup field it would be frozen
+        // until a restart, which is how a cap nobody can lower comes about.
+        let cfg = test_config("info", None, false);
+        let gw = Gateway::new(cfg.clone());
+
+        let asked = crate::quarry::RequestedCaps {
+            spend_micro_usd: Some(400_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            gw.quarry_policy()
+                .await
+                .resolve("alice", "discord-1", &asked)
+                .unwrap_err()
+                .code(),
+            "no_policy",
+            "an unconfigured gateway must deny by default"
+        );
+
+        let mut granted = cfg.clone();
+        granted.quarry.policy.default = Some(crate::config::QuarryPolicyEntry {
+            allowed_denominations: vec!["spend".into()],
+            max_spend_micro_usd: Some(200_000),
+            on_over_limit: "reduce".into(),
+            ..Default::default()
+        });
+        gw.hot_config.write().await.apply(&granted);
+
+        let grant = gw
+            .quarry_policy()
+            .await
+            .resolve("alice", "discord-1", &asked)
+            .expect("the reloaded policy should permit this");
+        assert_eq!(grant.spend_micro_usd, Some(200_000));
+        assert_eq!(grant.scope.key(), "channel=discord-1;user=alice;");
+    }
+
+    #[tokio::test]
+    async fn the_child_env_is_refused_without_a_token_and_carries_only_it_with_one() {
+        let cfg = test_config("info", None, false);
+        let gw = Gateway::new(cfg.clone());
+
+        // No token configured means /v1 is unauthenticated; there is no credential
+        // to mint and no point pretending otherwise.
+        assert_eq!(
+            gw.quarry_child_env().await.unwrap_err().code(),
+            "no_provider_token"
+        );
+
+        // A SIGHUP-rotated token must reach the next child, or every call it makes
+        // fails with the old one.
+        let mut with_token = cfg.clone();
+        with_token.gateway.api_token = Some("rotated".to_string());
+        gw.hot_config.write().await.apply(&with_token);
+
+        let env = gw.quarry_child_env().await.expect("token minted");
+        assert_eq!(env["QUARRY_PROVIDER_TOKEN"], "rotated");
+        assert!(env["QUARRY_PROVIDER_URL"].ends_with("/v1"));
+        assert_eq!(env.len(), 2, "the child gets nothing else: {env:?}");
     }
 
     #[tokio::test]

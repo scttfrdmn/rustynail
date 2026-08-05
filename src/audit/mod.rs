@@ -78,6 +78,36 @@ pub enum AuditEvent {
         cost_micro_usd: i64,
         duration_ms: u64,
     },
+    /// Policy resolved what a quarry run was allowed to spend, or refused it.
+    ///
+    /// Logged for grants as well as refusals: "what was this run allowed to
+    /// spend" is the first question asked after an unexpected bill, and it cannot
+    /// be answered from refusals alone.
+    ///
+    /// `scope_key` is the canonical scope string folded into every cache key. It
+    /// contains verified channel identity, which is already in the other quarry
+    /// events, and recording it is what lets an operator confirm two tenants never
+    /// addressed the same cache entry.
+    QuarryPolicyDecision {
+        user_id: String,
+        channel_id: String,
+        /// Which precedence level supplied the entry: `sender`, `channel`, or
+        /// `default`. Absent on a refusal with no matching entry.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        matched: Option<String>,
+        granted: bool,
+        /// The refusal code when `granted` is false.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        refusal: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requested_spend_micro_usd: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        granted_spend_micro_usd: Option<i64>,
+        /// `denomination:kind` pairs, e.g. `spend:reduced`.
+        adjustments: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope_key: Option<String>,
+    },
     /// A quarry run could not be started, or failed in supervision.
     QuarryRunFailed {
         #[serde(skip_serializing_if = "Option::is_none")]

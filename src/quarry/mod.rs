@@ -7,18 +7,20 @@
 //! flattened on the way through.
 //!
 //! - [`caps`] — parsing a sender's prose into quarry's `Caps`, or a question.
+//! - [`policy`] — what the sender is *allowed*, and the `Scope` their run carries.
 //! - [`event`] — the `RunEvent` wire types and the NDJSON line parser.
 //! - [`supervisor`] — spawning, lifecycle, and outcome classification.
 //!
-//! # What this module deliberately does not do
+//! # Request and policy are separate layers on purpose
 //!
-//! It does not decide what a sender may spend. [`caps`] reports what the sender
-//! *asked for*; caps and scope arrive on a [`supervisor::RunRequest`] already
-//! clamped by operator policy. Letting the request be the policy is exactly the
-//! failure the two layers are separated to prevent.
+//! [`caps`] reports what a sender *asked for*. [`policy`] decides what they may
+//! have, and mints the scope that qualifies every cache key. Caps and scope reach a
+//! [`supervisor::RunRequest`] only after [`policy`] has clamped them. Letting the
+//! request be the policy is exactly the failure the split prevents.
 
 pub mod caps;
 pub mod event;
+pub mod policy;
 pub mod supervisor;
 
 pub use caps::{
@@ -26,6 +28,10 @@ pub use caps::{
     SenderTimezone, TimezoneSource, UNLIMITED_MICRO_USD,
 };
 pub use event::{RunEvent, RunRecordSummary, StreamStats};
+pub use policy::{
+    CapAdjustment, CapsPolicy, ConfigCapsPolicy, Denomination, Grant, OverLimit, PolicyRefusal,
+    ScopeError, ScopeTags,
+};
 pub use supervisor::{RunOutcome, RunRequest, SpawnError, Supervisor, Termination};
 
 /// A stand-in `quarry` binary for tests.
@@ -238,6 +244,9 @@ mod tests {
             // fail on a slow machine.
             run_timeout_seconds: 0,
             default_timezone: String::new(),
+            // These tests drive the supervisor with caps already clamped; policy
+            // resolution has its own tests in `policy`.
+            policy: crate::config::QuarryPolicyConfig::default(),
         }
     }
 

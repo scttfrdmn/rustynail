@@ -1,0 +1,148 @@
+[
+  {
+    "name": "empty_scope",
+    "statement": "how many moons does mars have",
+    "tags": {},
+    "scope_key": "",
+    "problem_key": "f8541a4a36dfe58265589eb4c4e753e49def38cb007be79a29612744334dcbc4"
+  },
+  {
+    "name": "nil_scope",
+    "statement": "how many moons does mars have",
+    "tags": null,
+    "scope_key": "",
+    "problem_key": "f8541a4a36dfe58265589eb4c4e753e49def38cb007be79a29612744334dcbc4"
+  },
+  {
+    "name": "single_tag",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "user": "alice"
+    },
+    "scope_key": "user=alice;",
+    "problem_key": "6a5e58ef1d38e27b2fd80e24719dcb6bc93ae7b18f699498b2f8b5098b9c8d00"
+  },
+  {
+    "name": "two_tags_sorted_input",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "channel": "discord-1",
+      "user": "alice"
+    },
+    "scope_key": "channel=discord-1;user=alice;",
+    "problem_key": "6cee63d820cff3951d0a83c77213cb33d7eeee5a010147b51938ea6cd2087017"
+  },
+  {
+    "name": "two_tags_reverse_input",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "channel": "discord-1",
+      "user": "alice"
+    },
+    "scope_key": "channel=discord-1;user=alice;",
+    "problem_key": "6cee63d820cff3951d0a83c77213cb33d7eeee5a010147b51938ea6cd2087017"
+  },
+  {
+    "name": "different_user_same_statement",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "channel": "discord-1",
+      "user": "bob"
+    },
+    "scope_key": "channel=discord-1;user=bob;",
+    "problem_key": "8709202391485e64387087f7ca3dd9d2c268c8df6b0177f7033514103c73d7a6"
+  },
+  {
+    "name": "three_tags",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "channel": "discord-1",
+      "tenant": "acme",
+      "user": "alice"
+    },
+    "scope_key": "channel=discord-1;tenant=acme;user=alice;",
+    "problem_key": "a7fa27a9a083619d43a2dad5299384f4ed63d9a228bb2220dddc380fa835375c"
+  },
+  {
+    "name": "empty_value",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "user": ""
+    },
+    "scope_key": "user=;",
+    "problem_key": "92f636fc698285d7f0932419bb71775c9e8305dc7541b165eaabb3be891595c2"
+  },
+  {
+    "name": "value_with_equals",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "user": "a=b"
+    },
+    "scope_key": "user=a=b;",
+    "problem_key": "bdd9ee57aa62e8194b4fb611a4dd3a7eb66afdefb8c4c99942b06c627ef81504"
+  },
+  {
+    "name": "value_with_semicolon",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "user": "a;b"
+    },
+    "scope_key": "user=a;b;",
+    "problem_key": "772711b11533f37c96275ccc96cd6ad9763bd9f8ecbdeeb0b09ec172df12e9c0"
+  },
+  {
+    "name": "key_with_semicolon",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "us;er": "alice"
+    },
+    "scope_key": "us;er=alice;",
+    "problem_key": "05496104ecf4451e1594aa6c005215db75901ae7c1fde317ff6b00275b8d9d23"
+  },
+  {
+    "name": "unicode_value",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "user": "ålice"
+    },
+    "scope_key": "user=ålice;",
+    "problem_key": "c719f41678e1b24765858356a028417e0b46661757c6fbb9c5ed6762ddabb36e"
+  },
+  {
+    "name": "uppercase_key",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "User": "alice",
+      "user": "alice"
+    },
+    "scope_key": "User=alice;user=alice;",
+    "problem_key": "8f7de3d3c101f5a530f60c1c40afa2be80253977e52debff0774bb9ad355be00"
+  },
+  {
+    "name": "statement_whitespace",
+    "statement": "  how many moons does mars have  ",
+    "tags": {
+      "user": "alice"
+    },
+    "scope_key": "user=alice;",
+    "problem_key": "6a5e58ef1d38e27b2fd80e24719dcb6bc93ae7b18f699498b2f8b5098b9c8d00"
+  },
+  {
+    "name": "hierarchical",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "scope": "chemistry/chem-101"
+    },
+    "scope_key": "scope=chemistry/chem-101;",
+    "problem_key": "d2777d846d2e30d72f9407a10e9feef1c9cb4e707ff24ff8bcbc625bf88c98ea"
+  },
+  {
+    "name": "hierarchical_parent",
+    "statement": "how many moons does mars have",
+    "tags": {
+      "scope": "chemistry"
+    },
+    "scope_key": "scope=chemistry;",
+    "problem_key": "5d55aba1dfcbae4ef318b4961db6f681366c1d27a44e9e1f7664745bd3d7f2bb"
+  }
+]

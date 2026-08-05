@@ -81,6 +81,7 @@ async fn test_admin_requires_bearer_when_configured() {
         rate_limit: RateLimitConfig::default(),
         audit_enabled: false,
         audit_path: String::new(),
+        quarry_policy: rustynail::config::QuarryPolicyConfig::default(),
     }));
 
     let app = create_router(state, 1_048_576, 30);
