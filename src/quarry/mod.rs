@@ -43,7 +43,10 @@ pub use caps::{
     parse_caps, usd_to_micro, CapsParse, CapsRefusal, Disclosure, Question, RequestedCaps,
     SenderTimezone, TimezoneSource, UNLIMITED_MICRO_USD,
 };
-pub use event::{RunEvent, RunRecordSummary, StreamStats};
+pub use event::{
+    parse_line, stream_version, terminal_outcome, OutcomeEvent, RunEvent, RunRecordSummary,
+    StreamEvent, StreamStats, SUPPORTED_STREAM_VERSION,
+};
 pub use gate::{run_gated, GateOutcome, Responder};
 pub use policy::{
     CapAdjustment, CapsPolicy, ConfigCapsPolicy, Denomination, Grant, OverLimit, PolicyRefusal,
@@ -83,8 +86,11 @@ pub(crate) mod fake {
 
     /// What the fake binary should do.
     pub struct FakeBehavior {
-        /// Lines written to stdout, verbatim. Not necessarily valid JSON — a
-        /// malformed line is one of the cases that must be exercised.
+        /// Lines written to stdout, verbatim — **but only if the child was passed
+        /// `--events-json`**, which the real binary also requires.
+        ///
+        /// Not necessarily valid JSON: a malformed line is one of the cases that must
+        /// be exercised.
         pub stdout_lines: Vec<String>,
         /// Lines written to stderr.
         pub stderr_lines: Vec<String>,
@@ -101,6 +107,17 @@ pub(crate) mod fake {
         /// `sh`'s startup against a wall-clock timeout, and loses on a busy runner —
         /// then reports a supervisor bug that is not there.
         pub ready_file: bool,
+        /// What to print when `--events-json` was **not** passed, standing in for
+        /// quarry's human-readable summary.
+        ///
+        /// Emitted instead of [`Self::stdout_lines`], never alongside them. This
+        /// field is the reason the whole fake is worth having: for four commits this
+        /// script printed its canned NDJSON unconditionally, ignoring argv, so it
+        /// passed every test while `to_args()` omitted the one flag that makes the
+        /// stream exist at all. A fake that cannot fail the way the real binary fails
+        /// is not a test, and this is the same class of miss as the `[0.15.0]`
+        /// empty-buffer harness.
+        pub human_summary: Vec<String>,
     }
 
     impl Default for FakeBehavior {
@@ -112,6 +129,11 @@ pub(crate) mod fake {
                 exit_code: 0,
                 sleep_secs: 0.0,
                 ready_file: false,
+                human_summary: vec![
+                    "quarry: 2 nodes, 1 verified".into(),
+                    "total: $0.36".into(),
+                    "(run with --events-json for machine-readable output)".into(),
+                ],
             }
         }
     }
@@ -119,14 +141,25 @@ pub(crate) mod fake {
     impl FakeBehavior {
         /// A complete, untruncated run: two models, an answer, a reconciling
         /// receipt, an artifact with provenance, and a clean record.
+        ///
+        /// **Framed**, because that is what `--events-json` actually emits: a
+        /// `quarry_stream` header first and a `quarry_outcome` closer last, around
+        /// agate's four. A fixture missing the frame would let the supervisor's
+        /// terminal-event handling go untested on the one path every other test runs
+        /// through.
         pub fn happy() -> Self {
             Self {
                 stdout_lines: vec![
+                    r#"{"type":"quarry_stream","version":1,"producer":"quarry-go"}"#.into(),
                     r#"{"type":"model","tier":"m-1","label":"m-1","state":"done","cost":0.07}"#.into(),
                     r#"{"type":"model","tier":"m-2","label":"m-2","state":"done","cost":0.29}"#.into(),
                     r#"{"type":"answer","text":"the answer"}"#.into(),
                     r#"{"type":"receipt","rows":[{"label":"n0 q","kind":"llm","cost":0.07},{"label":"n0.1 q","kind":"llm","cost":0.29}],"total":0.36}"#.into(),
                     r#"{"type":"artifact","run_id":"deadbeef","url":"file:///r.json","provenance":{"record_hash":"deadbeef","verified":2,"unverified":0,"stability":1.0,"adversarial_findings":0}}"#.into(),
+                    // 360000 micro-units, stated as an integer on the wire. The two
+                    // float rows above sum to 0.36000000000000004, which is the
+                    // reason this field exists.
+                    r#"{"type":"quarry_outcome","outcome":"complete","bound_by":"","gaps":0,"unfunded":0,"total_micros":360000,"cap_micros":1000000}"#.into(),
                 ],
                 record_json: Some(
                     r#"{"RunID":"deadbeef","BoundBy":"","Outcomes":[
@@ -152,17 +185,32 @@ pub(crate) mod fake {
             // values is what makes "no credential reached the child" checkable
             // rather than assumed.
             script.push_str(&format!("env > '{}'\n", env_dump.display()));
-            // Find --out so the record lands where the supervisor expects it. A
+            // Find --out so the record lands where the supervisor expects it, and
+            // --events-json because without it the real binary emits no events. A
             // positional loop rather than getopts: the point is to mirror quarry's
             // "flags before the statement" contract, and getopts would not accept a
             // long option anyway.
-            script.push_str("OUT=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --out) OUT=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\n");
+            script.push_str("OUT=\"\"\nEVENTS=0\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --out) OUT=\"$2\"; shift 2;;\n    --events-json) EVENTS=1; shift;;\n    *) shift;;\n  esac\ndone\n");
             for line in &self.stderr_lines {
                 script.push_str(&format!("printf '%s\\n' {} >&2\n", shell_quote(line)));
             }
+            // The branch that makes the flag load-bearing. quarry does not degrade
+            // the stream when `--events-json` is absent — it emits a different thing
+            // entirely, on the same fd — so a fake that printed NDJSON either way
+            // would keep every test green with the flag deleted.
+            //
+            // Each branch opens with `:` so an empty `stdout_lines` — a real case,
+            // used to test a run that emits nothing — does not produce an empty `if`
+            // body, which `sh` rejects as a syntax error.
+            script.push_str("if [ \"$EVENTS\" = 1 ]; then\n  :\n");
             for line in &self.stdout_lines {
-                script.push_str(&format!("printf '%s\\n' {}\n", shell_quote(line)));
+                script.push_str(&format!("  printf '%s\\n' {}\n", shell_quote(line)));
             }
+            script.push_str("else\n  :\n");
+            for line in &self.human_summary {
+                script.push_str(&format!("  printf '%s\\n' {}\n", shell_quote(line)));
+            }
+            script.push_str("fi\n");
             if let Some(record) = &self.record_json {
                 script.push_str(&format!(
                     "[ -n \"$OUT\" ] && printf '%s' {} > \"$OUT\"\n",
@@ -243,6 +291,7 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
+    use super::event::terminal_outcome;
     use super::fake::FakeBehavior;
     use super::supervisor::{RunRequest, Supervisor, Termination};
     use crate::config::QuarryConfig;
@@ -284,7 +333,8 @@ mod tests {
             .expect("run starts");
 
         assert_eq!(out.termination, Termination::Completed);
-        assert_eq!(out.stats.events, 5);
+        // Seven: the frame's two, around agate's five.
+        assert_eq!(out.stats.events, 7);
         assert!(out.stats.clean(), "no lines should have been skipped");
         assert_eq!(out.answer(), Some("the answer"));
         assert_eq!(out.cost_micro_usd(), Some(360_000));
@@ -318,8 +368,16 @@ mod tests {
         }
         assert_eq!(
             streamed,
-            vec!["model", "model", "answer", "receipt", "artifact"],
-            "every event must reach the subscriber, in order"
+            vec![
+                "quarry_stream",
+                "model",
+                "model",
+                "answer",
+                "receipt",
+                "artifact",
+                "quarry_outcome",
+            ],
+            "every event must reach the subscriber, in order — the frame included"
         );
         assert_eq!(streamed.len(), out.events.len());
     }
@@ -339,7 +397,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.termination, Termination::Completed);
-        assert_eq!(out.events.len(), 5, "events are still recorded");
+        assert_eq!(out.events.len(), 7, "events are still recorded");
     }
 
     #[tokio::test]
@@ -426,7 +484,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.termination, Termination::Completed, "the run survives");
-        assert_eq!(out.stats.events, 5, "every good event still parsed");
+        assert_eq!(out.stats.events, 7, "every good event still parsed");
         assert_eq!(out.stats.bad_lines.len(), 2, "and the skips are recorded");
         assert!(!out.stats.clean());
         assert_eq!(out.answer(), Some("the answer"));
@@ -475,7 +533,13 @@ mod tests {
         assert_eq!(out.termination, Termination::Completed);
         assert!(out.stats.clean(), "an unknown kind is not a bad line");
         assert_eq!(out.stats.unknown_kinds.get("verification"), Some(&1));
-        assert_eq!(out.stats.events, 6);
+        assert_eq!(out.stats.events, 8);
+        assert!(
+            !out.stats.unknown_kinds.contains_key("quarry_stream")
+                && !out.stats.unknown_kinds.contains_key("quarry_outcome"),
+            "the frame's own events are first-class, not unknown kinds — reading them \
+             as unknown is what discarded the version and the terminal verdict"
+        );
     }
 
     #[tokio::test]
@@ -539,7 +603,17 @@ mod tests {
         // quarry exits ZERO and returns a partial answer with its gaps named — a
         // legitimate result. The verdict comes from the record's BoundBy, never
         // from a short event stream.
+        //
+        // This is the **unframed** path, and deliberately: it is where a spend
+        // denomination can still surface as a truncation. A framed run never does —
+        // quarry reports being priced out as `cap-bound-degradation` with an *empty*
+        // `bound_by` and exit 0, because it planned to fit the cap it was given and
+        // did. So this asserts the pre-frame fallback still reads the record's
+        // denomination correctly rather than reaching for the time remedy.
         let mut behavior = FakeBehavior::happy();
+        behavior
+            .stdout_lines
+            .retain(|l| !l.contains("quarry_stream") && !l.contains("quarry_outcome"));
         behavior.record_json = Some(
             r#"{"RunID":"deadbeef","BoundBy":"spend","Outcomes":[
                 {"NodeID":"n0","Content":"partial","Cost":70000,"Model":"m-1","Verified":true}
@@ -677,7 +751,7 @@ mod tests {
 
         assert!(fake.is_ready(), "the child did emit before being killed");
         assert_eq!(out.termination, Termination::Cancelled);
-        assert_eq!(out.stats.events, 5, "every emitted event survived the kill");
+        assert_eq!(out.stats.events, 7, "every emitted event survived the kill");
         assert_eq!(out.answer(), Some("the answer"));
         assert_eq!(
             out.cost_micro_usd(),
@@ -723,12 +797,12 @@ mod tests {
     #[tokio::test]
     async fn a_crash_is_not_reported_as_a_degraded_run() {
         // Both a crash and a truncated run produce fewer events than a full run.
-        // The exit status plus the record is the only thing separating them, which
-        // is why the event count is never consulted.
+        // The exit code plus the frame is the only thing separating them, which is
+        // why the event count is never consulted. Exit 1 is quarry's fault code.
         let fake = FakeBehavior {
             stdout_lines: vec![r#"{"type":"model","label":"m-1","cost":0.01}"#.into()],
             stderr_lines: vec!["panic: provider unreachable".into()],
-            exit_code: 2,
+            exit_code: 1,
             ..Default::default()
         }
         .build();
@@ -739,7 +813,7 @@ mod tests {
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
             .await
             .unwrap();
-        assert_eq!(out.termination, Termination::Crashed { exit_code: 2 });
+        assert_eq!(out.termination, Termination::Crashed { exit_code: 1 });
         assert!(!out.termination.produced_record());
         assert!(!out.termination.time_truncated() && !out.termination.spend_truncated());
         // stderr is what tells an operator why, and it is surfaced on failure.
@@ -748,13 +822,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_no_answer_run_keeps_its_citable_record() {
-        // quarry's errNoAnswer exits 1 but still writes a record — one that
-        // faithfully says nothing was affordable. Classifying it as a crash would
-        // throw that record away.
+        // A no-answer run exits 4 and still writes a record — one that faithfully
+        // says nothing was affordable. Classifying it as a crash would throw that
+        // record away.
+        //
+        // Note `"rows":[]` and not `null`: quarry emits an empty array, and the
+        // distinction matters to a host that would otherwise render "no receipt"
+        // where the truth is "a receipt for nothing".
         let fake = FakeBehavior {
             stdout_lines: vec![
+                r#"{"type":"quarry_stream","version":1,"producer":"quarry-go"}"#.into(),
                 r#"{"type":"receipt","rows":[],"total":0}"#.into(),
                 r#"{"type":"artifact","run_id":"empty","url":""}"#.into(),
+                r#"{"type":"quarry_outcome","outcome":"no-answer","bound_by":"spend","gaps":0,"unfunded":1,"total_micros":0,"cap_micros":1000000}"#.into(),
             ],
             record_json: Some(
                 r#"{"RunID":"empty","BoundBy":"spend","Outcomes":[
@@ -762,7 +842,7 @@ mod tests {
                 ]}"#
                 .into(),
             ),
-            exit_code: 1,
+            exit_code: 4,
             ..Default::default()
         }
         .build();
@@ -776,9 +856,17 @@ mod tests {
         assert_eq!(out.termination, Termination::NoAnswer);
         assert!(out.termination.produced_record());
         assert!(out.answer().is_none());
+
+        // The frame states it directly, in integers: nothing spent, one node priced
+        // out, and zero gaps — because only time makes a gap.
+        let outcome = terminal_outcome(&out.events).expect("the frame closed");
+        assert_eq!(outcome.total_micros, 0);
+        assert_eq!(outcome.unfunded, 1);
+        assert_eq!(outcome.gaps, 0);
+        assert!(outcome.has_spend_cap());
+
         let record = out.record.expect("the record is still readable");
-        // And it records why: an unfunded node, which is spend degradation and NOT
-        // a gap.
+        // And the record corroborates it, independently.
         assert_eq!(record.unfunded().len(), 1);
         assert!(record.gaps().is_empty(), "only time is a gap");
         assert!(record.truncated());
@@ -878,6 +966,60 @@ mod tests {
         // And the run itself still works with the full flag set.
         let out = s.run(req, None, None).await.unwrap();
         assert_eq!(out.termination, Termination::Completed);
+    }
+
+    #[tokio::test]
+    async fn the_events_json_flag_is_what_makes_the_stream_exist() {
+        // The flag this integration shipped without for four commits. quarry does not
+        // degrade its output when `--events-json` is absent — it writes a human
+        // summary to the same fd and emits NO events — so every real run classified as
+        // `StreamMalformed` while every test stayed green, because the fake printed
+        // its canned NDJSON regardless of argv.
+        //
+        // Asserting `to_args()` contains the flag is half of it. The other half is
+        // that the fake now HONOURS the flag, so deleting it from `to_args()` fails
+        // here instead of passing.
+        let args = RunRequest::new("u1", "c", "why", 1_000_000).to_args();
+        assert!(
+            args.contains(&"--events-json".to_string()),
+            "without this flag quarry emits no events at all"
+        );
+
+        let fake = FakeBehavior::happy().build();
+        let runs = tempfile::tempdir().unwrap();
+        let s = Supervisor::new(config(&fake, runs.path()));
+        let out = s
+            .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
+            .await
+            .unwrap();
+        assert_eq!(out.termination, Termination::Completed);
+        assert!(out.stats.events > 0);
+    }
+
+    #[tokio::test]
+    async fn without_the_flag_the_fake_emits_a_human_summary_and_no_events() {
+        // The mutation check for the test above, run as a test rather than by hand:
+        // it drives the fake with the flag withheld and asserts the failure mode is
+        // the one the real binary produces. If the fake ever stops honouring the
+        // flag, this test — not a future production incident — is what notices.
+        let fake = FakeBehavior::happy().build();
+        let runs = tempfile::tempdir().unwrap();
+        let s = Supervisor::new(config(&fake, runs.path()));
+
+        let mut req = RunRequest::new("u1", "c", "why", 1_000_000);
+        req.suppress_events_json_for_test = true;
+        let out = s.run(req, None, None).await.unwrap();
+
+        assert_eq!(
+            out.termination,
+            Termination::StreamMalformed,
+            "no flag means no events, and no events is a contract break"
+        );
+        assert_eq!(out.stats.events, 0);
+        assert!(
+            out.stats.bad_lines.len() >= 2,
+            "the human summary lines are unparseable, which is exactly how this looks in production"
+        );
     }
 
     #[tokio::test]

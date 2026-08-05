@@ -25,6 +25,11 @@ diary/
 dist/
 bin/
 
+# quarry run records, if a run is ever pointed at the repo root rather than a
+# configured `run_record_dir`. These are real artifacts of real runs and can carry
+# problem statements and answers, so they must never be committed by accident.
+quarry-run-*.json
+
 
 # Added by cargo
 #
