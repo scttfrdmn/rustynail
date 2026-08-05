@@ -39,7 +39,9 @@
 
 use crate::audit::{AuditEvent, AuditLogger};
 use crate::config::QuarryConfig;
-use crate::quarry::event::{parse_line, RunEvent, RunRecordSummary, StreamStats};
+use crate::quarry::event::{
+    self as event, parse_line, OutcomeEvent, RunEvent, RunRecordSummary, StreamStats,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -100,6 +102,14 @@ pub struct RunRequest {
     ///
     /// See [`Supervisor::spawn`] — this is the *entire* environment the child gets.
     pub env: BTreeMap<String, String>,
+    /// Withhold `--events-json`, to prove a test would notice its absence.
+    ///
+    /// Exists only so the mutation check for the flag can be a test rather than a
+    /// hand edit someone has to remember to make. `#[cfg(test)]` so it cannot be set
+    /// in a release build: this is the one flag whose omission silently disables the
+    /// entire event stream, and nothing outside a test may ask for that.
+    #[cfg(test)]
+    pub suppress_events_json_for_test: bool,
 }
 
 impl RunRequest {
@@ -116,6 +126,8 @@ impl RunRequest {
             scope_tags: BTreeMap::new(),
             fake: false,
             env: BTreeMap::new(),
+            #[cfg(test)]
+            suppress_events_json_for_test: false,
         }
     }
 
@@ -160,9 +172,23 @@ impl RunRequest {
         if self.fake {
             args.push("--fake".to_string());
         }
-        // `--quiet` suppresses quarry's interactive tree. The host renders its own
-        // view from the event stream, and the tree would otherwise interleave
-        // terminal control sequences into the stdout we are parsing.
+        // `--events-json` is what makes this integration exist at all. Without it
+        // quarry writes its human summary to stdout and emits **no events**:
+        // `cmd/quarry/run.go` gates the entire `WriteRunEvents` call on the flag, and
+        // moves human output to stderr only when it is set. Omitting it does not
+        // degrade the stream, it removes it, and every run then classifies as
+        // `StreamMalformed`.
+        #[cfg(test)]
+        let emit_events = !self.suppress_events_json_for_test;
+        #[cfg(not(test))]
+        let emit_events = true;
+        if emit_events {
+            args.push("--events-json".to_string());
+        }
+        // `--quiet` suppresses quarry's interactive tree. Belt and braces alongside
+        // the flag above: `--events-json` already redirects the tree to stderr, but
+        // an ANSI-repainting tree on the stderr we also drain is noise in the logs,
+        // and the host renders its own view from the events.
         args.push("--quiet".to_string());
         args.push(self.statement.clone());
         args
@@ -227,6 +253,38 @@ pub enum Termination {
     /// continues. Kept separate so a caller retries a malformed *line* forever
     /// without retrying a malformed *stream* at all.
     StreamMalformed,
+    /// The stream declared a contract version this build does not implement.
+    ///
+    /// **Refused rather than folded**, which is the entire reason quarry puts the
+    /// version on the first line. Its compatibility rule is that adding an event
+    /// *kind* is a minor change a host must tolerate, while changing or removing a
+    /// *field* — or changing what an existing kind means — is major and bumps the
+    /// version. So an unknown version is by definition a change that skipping cannot
+    /// absorb: the events we still recognise may no longer mean what we read them to
+    /// mean, and folding them would produce a confident wrong receipt.
+    StreamVersionUnsupported { declared: u32 },
+    /// The stream ended with no terminal `quarry_outcome` event.
+    ///
+    /// **The run was killed.** NDJSON yields complete lines whether or not the
+    /// producer finished, so a stream cut off after the artifact event is
+    /// byte-indistinguishable from a clean one except for this absence — which is
+    /// why quarry added the terminal event and why it must never be defaulted to
+    /// "complete". Events read before the cut are kept: they were paid for.
+    ///
+    /// Distinct from [`Self::Crashed`] because the child may well have exited zero.
+    /// A stream truncated mid-line is this, not a bad line.
+    StreamIncomplete { events_read: usize },
+    /// quarry refused the invocation: bad flags, or caps it would not accept.
+    ///
+    /// **A host defect, not a run outcome.** Nothing was attempted, so there is
+    /// nothing to retry and nothing to cite — the args we built are wrong and need a
+    /// code change. Kept out of [`Self::Crashed`] because a crash invites a retry and
+    /// this one would fail identically forever.
+    ///
+    /// The line between this and a fault is whether anything was *attempted*:
+    /// upstream notes that `quarry show nonexistent.json` is a fault, not a usage
+    /// error, because the invocation was well-formed and the read failed.
+    UsageError,
 }
 
 impl Termination {
@@ -242,6 +300,9 @@ impl Termination {
             Self::Crashed { .. } => "crashed",
             Self::KilledBySignal { .. } => "killed_by_signal",
             Self::StreamMalformed => "stream_malformed",
+            Self::StreamVersionUnsupported { .. } => "stream_version_unsupported",
+            Self::StreamIncomplete { .. } => "stream_incomplete",
+            Self::UsageError => "usage_error",
         }
     }
 
@@ -306,6 +367,19 @@ impl std::fmt::Display for Termination {
             Self::KilledBySignal { signal: Some(s) } => write!(f, "killed by signal {s}"),
             Self::KilledBySignal { signal: None } => write!(f, "killed by a signal"),
             Self::StreamMalformed => write!(f, "no parseable events — wrong binary?"),
+            Self::StreamVersionUnsupported { declared } => write!(
+                f,
+                "refused a stream declaring contract version {declared}; this build implements {}",
+                crate::quarry::event::SUPPORTED_STREAM_VERSION
+            ),
+            Self::StreamIncomplete { events_read } => write!(
+                f,
+                "the stream ended without its terminal outcome event after {events_read} events — the run was killed"
+            ),
+            Self::UsageError => write!(
+                f,
+                "quarry rejected the invocation — the arguments we built are wrong"
+            ),
         }
     }
 }
@@ -1059,29 +1133,60 @@ async fn read_record(path: &Path) -> Option<RunRecordSummary> {
 
 // ── Classification ────────────────────────────────────────────────────────────
 
-/// quarry's exit code for a run that produced no answer at all.
+/// quarry's exit-code vocabulary.
 ///
-/// quarry returns its `errNoAnswer` sentinel from `runCmd`, and `main` maps every
-/// error to `os.Exit(1)` — so this is 1, shared with a genuine fault. The two are
-/// separated by the presence of a written record and an artifact event, not by the
-/// code. See [`classify`].
-const EXIT_FAILURE: i32 = 1;
+/// Five codes, not two. An earlier reading of this integration assumed `main` mapped
+/// every error to 1 and separated the outcomes by inspecting the events instead —
+/// which classified a time-truncated run holding a perfectly good partial answer as a
+/// crash. The codes are the contract; the events corroborate them.
+///
+/// The split that matters is between the two *degraded but honest* codes and the two
+/// faults. 3 and 4 both write a citable record. 1 and 2 do not.
+mod exit {
+    /// Complete — **and cap-bound degradation**, which is a success: quarry planned
+    /// to fit the cap it was given and did, so nothing went wrong.
+    pub const COMPLETE: i32 = 0;
+    /// A fault. Something broke that has nothing to do with what was asked.
+    pub const FAULT: i32 = 1;
+    /// A usage error: quarry refused the invocation. Our bug, not the run's.
+    pub const USAGE: i32 = 2;
+    /// Time-truncated: a deadline or latency cap bit. **There may still be an
+    /// answer**, and if there is, it is the answer the system promised to return.
+    pub const TIME_TRUNCATED: i32 = 3;
+    /// No answer at all. The record still lands and is still citable.
+    pub const NO_ANSWER: i32 = 4;
+}
+
+/// What to report when `wait` itself failed and no code exists.
+const EXIT_UNKNOWN: i32 = -1;
 
 /// Decide how a run ended.
 ///
-/// Order matters, and each step is a distinction that would otherwise collapse:
+/// The order is the argument. Each step is a distinction that collapses if the one
+/// above it is allowed to answer first:
 ///
-/// 1. **Our own kill wins.** A killed child looks signal-terminated, which would
+/// 1. **Our own kill wins.** A child we killed looks signal-terminated, which would
 ///    report the mechanism instead of the reason — and would lose that the reason
 ///    was time.
 /// 2. **A signal death is not a non-zero exit.** Nothing in the child chose it, so
-///    its own error handling never ran.
-/// 3. **No events at all is a contract break**, distinct from the bad lines that
-///    are skipped mid-stream.
-/// 4. **Exit 1 with a record and an artifact is `NoAnswer`**, not a crash: quarry
-///    wrote a citable record saying nothing was affordable. Exit 1 without one is a
-///    genuine fault.
-/// 5. **Truncation is read from the record**, never inferred from the event count.
+///    its own error handling never ran and no code exists to read.
+/// 3. **Version before content.** If the stream declares a contract we do not
+///    implement, every field below is suspect and reading them would produce a
+///    confident wrong receipt. Refuse, do not fold.
+/// 4. **No events at all is a contract break**, distinct from the individual bad
+///    lines that are skipped while the run continues.
+/// 5. **The terminal outcome event is the authority.** It carries quarry's own
+///    verdict — `outcome`, `bound_by`, `gaps`, `unfunded`, and the money as
+///    integers — so where it exists we take it over anything we could infer.
+/// 6. **Its absence means the run was killed.** NDJSON yields complete lines
+///    whether or not the producer finished, so a stream cut off after the artifact
+///    is byte-indistinguishable from a clean one *except* for this absence. It must
+///    never default to complete.
+/// 7. **The record is the fallback**, for a stream that predates the frame.
+///
+/// Exit codes are read as the documented five, and 3 is the one that used to be a
+/// bug: a time-truncated run holding a usable partial answer exits 3, and reporting
+/// that as a crash discards exactly the result quarry promises to return.
 fn classify(
     forced: Forced,
     status: Option<std::process::ExitStatus>,
@@ -1100,21 +1205,43 @@ fn classify(
         // The wait itself failed, so nothing is known about how the child ended.
         // Reporting this as a clean completion would be a guess in the dangerous
         // direction.
-        return Termination::Crashed { exit_code: -1 };
+        return Termination::Crashed {
+            exit_code: EXIT_UNKNOWN,
+        };
     };
 
-    if status.code().is_none() {
+    let Some(code) = status.code() else {
         return Termination::KilledBySignal {
             signal: signal_of(&status),
         };
-    }
-    let code = status.code().unwrap_or(EXIT_FAILURE);
+    };
 
-    // No parseable event at all: the wrong binary, or a quarry that no longer
-    // emits this stream. Distinct from `stats.bad_lines`, which are individually
-    // recoverable — a caller must not retry a contract break the way it retries a
-    // transient fault. Checked before the exit code because a zero-exit process
-    // that emitted nothing is equally not a completed run.
+    // Before anything is read out of the stream: does it claim a contract we
+    // implement? quarry's rule is that a new event *kind* is minor and must be
+    // tolerated, while a changed field or a changed meaning is major and bumps this
+    // number. So an unknown version is by definition a change that skipping cannot
+    // absorb — the events we still recognise may no longer mean what we read them to
+    // mean. Checked ahead of the exit code because a zero exit says nothing about
+    // whether we understood the bytes.
+    if let Some(declared) = event::stream_version(events) {
+        if declared != event::SUPPORTED_STREAM_VERSION {
+            return Termination::StreamVersionUnsupported { declared };
+        }
+    }
+
+    // A usage error is ours, and it is not a run: quarry refused the invocation
+    // before attempting anything, so there is no stream to interpret and no record
+    // to cite. Kept above the event checks because the empty stream here is a
+    // consequence, not a contract break.
+    if code == exit::USAGE {
+        return Termination::UsageError;
+    }
+
+    // No parseable event at all: the wrong binary, a quarry that no longer emits
+    // this stream — or, as this integration shipped once, `--events-json` never
+    // passed, in which case quarry writes a human summary and emits nothing.
+    // Distinct from `stats.bad_lines`, which are individually recoverable: a caller
+    // must not retry a contract break the way it retries a transient fault.
     if stats.events == 0 {
         return Termination::StreamMalformed;
     }
@@ -1122,39 +1249,109 @@ fn classify(
     let has_answer = events
         .iter()
         .any(|e| matches!(e, RunEvent::Answer(a) if !a.text.trim().is_empty()));
-    let has_artifact = events.iter().any(|e| matches!(e, RunEvent::Artifact(_)));
 
-    if code != 0 {
-        // quarry writes a record and emits an artifact even for a run that
-        // produced nothing — that record is exactly the kind a researcher must be
-        // able to cite. So exit 1 with an artifact and no answer is the no-answer
-        // outcome, not a crash. Without either, the child failed for a reason
-        // unrelated to affordability.
-        if !has_answer && (has_artifact || record.is_some()) {
-            return Termination::NoAnswer;
-        }
-        return Termination::Crashed { exit_code: code };
+    // The frame's own verdict, when the frame is closed. Scanned backwards, because
+    // a future event kind is permitted to follow the outcome.
+    if let Some(outcome) = event::terminal_outcome(events) {
+        return classify_from_outcome(outcome, code, has_answer);
     }
 
-    // Zero exit. quarry deliberately exits zero for a truncated run with content:
-    // a partial answer with its gaps named is what the system promises to return.
+    // No terminal event. Whether that is a killed run turns on whether the frame was
+    // ever *opened*: a `quarry_stream` header with no `quarry_outcome` closer is a
+    // stream cut off mid-run, while a stream with neither is not framed at all — an
+    // older quarry, or agate's four events read directly — and there was never a
+    // closer to miss.
+    if event::stream_version(events).is_some() {
+        // The frame opened and never closed. A fault still reports as a fault: the
+        // exit code is real information and more specific than "cut off". Every other
+        // code, **including zero**, is a killed run, because a clean stream and a
+        // severed one are byte-identical except for the absence we just found.
+        if code == exit::FAULT {
+            return Termination::Crashed { exit_code: code };
+        }
+        return Termination::StreamIncomplete {
+            events_read: stats.events,
+        };
+    }
+
+    // Unframed. This is the pre-frame path: the record is the authority, which is
+    // what this integration read before the terminal event existed.
+    if code == exit::FAULT {
+        return Termination::Crashed { exit_code: code };
+    }
     if let Some(record) = record {
         if record.truncated() {
             return Termination::Truncated {
-                bound_by: if record.bound_by.is_empty() {
-                    None
-                } else {
-                    Some(record.bound_by.clone())
-                },
+                bound_by: non_empty(&record.bound_by),
             };
         }
     }
-    if !has_answer {
-        // Zero exit with no answer event. quarry should not produce this, but
-        // reporting it as `Completed` would present an empty result as an answer.
-        return Termination::NoAnswer;
+    match code {
+        exit::TIME_TRUNCATED => Termination::Truncated {
+            // No frame and no record to name the denomination. Exit 3 is time by
+            // definition, so `latency` is the honest floor — never `spend`, which
+            // would send a caller to raise a cap that was not what ran out.
+            bound_by: Some("latency".to_string()),
+        },
+        exit::NO_ANSWER => Termination::NoAnswer,
+        // Zero exit with no answer event. Reporting it as `Completed` would present
+        // an empty result as an answer.
+        exit::COMPLETE if !has_answer => Termination::NoAnswer,
+        exit::COMPLETE => Termination::Completed,
+        other => Termination::Crashed { exit_code: other },
     }
-    Termination::Completed
+}
+
+/// Read the terminal event's verdict, with the exit code as a cross-check.
+///
+/// quarry's `outcome` field and its exit code are two encodings of the same
+/// decision, and they agree in every fixture. Where the field is missing or a value
+/// we do not know, the code decides — a host that trusted only the string would
+/// report a future outcome name as complete.
+///
+/// The money is **not** touched here. `total_micros` and `cap_micros` are already
+/// integers on the wire and are read straight off it; re-deriving them from the
+/// float rows is the mistake the corpus exists to catch, and `cap_micros: -1` means
+/// no cap rather than a cap of nothing.
+fn classify_from_outcome(outcome: &OutcomeEvent, code: i32, has_answer: bool) -> Termination {
+    match outcome.outcome.as_str() {
+        // Both are successes, and deliberately indistinguishable here: quarry plans
+        // to fit the cap it was given, so being priced out of a branch is the plan
+        // working, disclosed before the run and inside the authority granted. It is
+        // reported in the receipt as `unfunded`, never as a gap and never as a
+        // failure.
+        "complete" | "cap-bound-degradation" => Termination::Completed,
+        // Time. There may be an answer, and if there is, it is the promise being
+        // kept, not broken.
+        "time-truncated" => Termination::Truncated {
+            bound_by: Some(non_empty(&outcome.bound_by).unwrap_or_else(|| "latency".to_string())),
+        },
+        "no-answer" => Termination::NoAnswer,
+        // A value this build has never seen. Deciding from the code is the safe
+        // direction: it cannot invent an answer that is not there.
+        _ => match code {
+            exit::COMPLETE if has_answer => Termination::Completed,
+            exit::COMPLETE => Termination::NoAnswer,
+            exit::TIME_TRUNCATED => Termination::Truncated {
+                bound_by: Some(
+                    non_empty(&outcome.bound_by).unwrap_or_else(|| "latency".to_string()),
+                ),
+            },
+            exit::NO_ANSWER => Termination::NoAnswer,
+            other => Termination::Crashed { exit_code: other },
+        },
+    }
+}
+
+/// `""` is quarry's "no cap bound this run", and it is emitted because it is a
+/// measurement rather than an omission. `None` carries that distinction; an empty
+/// `Some` would read as a denomination named the empty string.
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 /// The signal that killed a process, on platforms that report one.
@@ -1172,7 +1369,9 @@ fn signal_of(_status: &std::process::ExitStatus) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quarry::event::{AnswerEvent, ArtifactEvent, ReceiptEvent};
+    use crate::quarry::event::{
+        AnswerEvent, ArtifactEvent, ReceiptEvent, StreamEvent, SUPPORTED_STREAM_VERSION,
+    };
 
     // ── Argument rendering ────────────────────────────────────────────────────
 
@@ -1294,6 +1493,25 @@ mod tests {
             run_id: "abc".into(),
             url: String::new(),
             provenance: None,
+        })
+    }
+
+    /// The frame's opening line.
+    fn stream_header(version: u32) -> RunEvent {
+        RunEvent::Stream(StreamEvent {
+            version,
+            producer: "quarry-go".to_string(),
+        })
+    }
+
+    /// The frame's closing line — quarry's own verdict on the run.
+    fn outcome(outcome: &str, bound_by: &str, gaps: u64, unfunded: u64) -> RunEvent {
+        RunEvent::Outcome(OutcomeEvent {
+            outcome: outcome.to_string(),
+            bound_by: bound_by.to_string(),
+            gaps,
+            unfunded,
+            ..Default::default()
         })
     }
 
@@ -1454,32 +1672,51 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn crash_is_not_completion_and_not_no_answer() {
-        // A non-zero exit with a partial stream and no record is a FAULT. Both a
-        // crash and a degraded run produce fewer events than a full run, so the
-        // exit status plus the record is the only thing separating them.
+        // Exit 1 is the fault code, and with no record and no closed frame there is
+        // nothing to say the child got as far as deciding anything about the work.
         let t = classify(
             Forced::No,
-            Some(exit_status(2)),
+            Some(exit_status(1)),
             &[RunEvent::Receipt(ReceiptEvent::default())],
             &stats_with(1),
             None,
             Duration::from_secs(1),
         );
-        assert_eq!(t, Termination::Crashed { exit_code: 2 });
+        assert_eq!(t, Termination::Crashed { exit_code: 1 });
         assert!(!t.produced_record(), "a crash leaves nothing citable");
         assert!(!t.time_truncated() && !t.spend_truncated());
     }
 
     #[test]
     #[cfg(unix)]
-    fn exit_one_with_a_record_and_no_answer_is_no_answer_not_a_crash() {
-        // quarry's errNoAnswer also exits 1, and it still WRITES a record — one
+    fn a_usage_error_is_our_bug_and_not_a_crash() {
+        // Exit 2 means quarry refused the invocation: the args we built are wrong.
+        // Kept out of `Crashed` because a crash invites a retry and this one would
+        // fail identically forever. Nothing was attempted, so the empty stream here
+        // is a consequence and must not surface as a contract break either.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(2)),
+            &[],
+            &StreamStats::default(),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::UsageError);
+        assert_ne!(t, Termination::StreamMalformed);
+        assert!(!t.produced_record());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exit_four_with_a_record_is_no_answer_not_a_crash() {
+        // No-answer has its own exit code, 4, and it still WRITES a record — one
         // that faithfully says nothing was affordable, which is a useful artifact.
         // Classifying it as a crash would discard a valid record.
         let record = record_json("", serde_json::json!([]));
         let t = classify(
             Forced::No,
-            Some(exit_status(1)),
+            Some(exit_status(4)),
             &[artifact()],
             &stats_with(1),
             Some(&record),
@@ -1491,19 +1728,226 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn exit_one_with_no_record_and_no_artifact_is_a_crash() {
-        // The vacuity guard for the test above: without a record or an artifact
-        // there is nothing to say the child got as far as deciding it could not
-        // afford anything.
+    fn exit_three_with_a_partial_answer_is_time_truncation_not_a_crash() {
+        // The bug this whole classifier rewrite exists for. quarry exits 3 when a
+        // deadline or latency cap bit, and that run may hold a perfectly good
+        // partial answer — which is the result the system promises to return, not a
+        // failure. Reporting it as a crash threw the answer away.
+        //
+        // With no frame and no record to name the denomination, `latency` is the
+        // honest floor. What must never happen is `spend`: a caller told "priced
+        // out" would raise a cap and buy nothing, because what ran out was time.
         let t = classify(
             Forced::No,
-            Some(exit_status(1)),
-            &[RunEvent::Receipt(ReceiptEvent::default())],
-            &stats_with(1),
+            Some(exit_status(3)),
+            &[answer("as far as we got"), artifact()],
+            &stats_with(2),
             None,
             Duration::from_secs(1),
         );
-        assert_eq!(t, Termination::Crashed { exit_code: 1 });
+        assert_eq!(
+            t,
+            Termination::Truncated {
+                bound_by: Some("latency".to_string())
+            }
+        );
+        assert!(t.time_truncated(), "exit 3 is time, by definition");
+        assert!(!t.spend_truncated());
+        assert!(t.produced_record());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_terminal_outcome_event_outranks_the_exit_code() {
+        // The frame carries quarry's own verdict, so where it exists we take it. A
+        // cap-bound-degradation run exits 0 and IS a success: quarry planned to fit
+        // the cap it was given and did. Being priced out of a branch is the plan
+        // working, disclosed before the run and inside the authority granted.
+        //
+        // `bound_by` is EMPTY here, matching the `live-partition` fixture. quarry does
+        // not name spend as having "bound" a run it planned to fit — which is why
+        // `Truncated { bound_by: Some("spend") }` is reachable only on the unframed
+        // record path below, never from a frame.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(0)),
+            &[
+                stream_header(1),
+                answer("the affordable part"),
+                outcome("cap-bound-degradation", "", 0, 5),
+            ],
+            &stats_with(3),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::Completed);
+        assert!(
+            !t.spend_truncated(),
+            "planned degradation inside authority is not a truncation"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_frame_that_opens_and_never_closes_is_a_killed_run_even_on_exit_zero() {
+        // NDJSON yields complete lines whether or not the producer finished, so a
+        // stream cut off after the artifact is byte-identical to a clean one EXCEPT
+        // for the missing terminal event. That absence is the only in-band kill
+        // signal there is, and defaulting it to `Completed` would publish a receipt
+        // for a run that never finished.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(0)),
+            &[stream_header(1), answer("looks complete"), artifact()],
+            &stats_with(3),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::StreamIncomplete { events_read: 3 });
+        assert_ne!(t, Termination::Completed);
+        assert!(!t.produced_record(), "nothing here is citable");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unframed_stream_is_not_reported_as_cut_off() {
+        // The vacuity guard for the test above. Without a `quarry_stream` header
+        // there was never a closer to miss — an older quarry, or agate's four events
+        // read directly — so the record path still decides. If this asserted
+        // `StreamIncomplete` too, the test above would prove nothing about the frame.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(0)),
+            &[answer("looks complete"), artifact()],
+            &stats_with(2),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::Completed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stream_declaring_an_unknown_version_is_refused_not_folded() {
+        // The version is on the first line precisely so a host can refuse. quarry's
+        // rule: a new event KIND is minor and must be tolerated, but a changed field
+        // or a changed meaning is major and bumps this number. So the events we still
+        // recognise here may no longer mean what we read them to mean, and folding
+        // them would produce a confident wrong receipt.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(0)),
+            &[
+                stream_header(SUPPORTED_STREAM_VERSION + 1),
+                answer("do not trust me"),
+                outcome("complete", "", 0, 0),
+            ],
+            &stats_with(3),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            t,
+            Termination::StreamVersionUnsupported {
+                declared: SUPPORTED_STREAM_VERSION + 1
+            }
+        );
+        assert!(
+            !t.produced_record(),
+            "a stream we cannot read yields nothing citable, even with an outcome saying complete"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_terminal_event_is_found_by_scanning_backwards() {
+        // Tolerating a new event kind means tolerating one AFTER the outcome. A
+        // forward scan that stopped at the last event, or one that required the
+        // outcome to be last, would report a complete run as cut off the first time
+        // quarry appends anything.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(0)),
+            &[
+                stream_header(1),
+                answer("done"),
+                outcome("complete", "", 0, 0),
+                RunEvent::Unknown {
+                    event_type: "quarry_future_kind".to_string(),
+                    raw: serde_json::json!({"type":"quarry_future_kind"}),
+                },
+            ],
+            &stats_with(4),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::Completed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_time_truncated_outcome_names_its_own_denomination() {
+        // `bound_by` comes off the wire rather than being inferred. A `due` bound is
+        // still time, and must not be flattened into `latency`: they are different
+        // things to tell a caller — one missed a deadline, the other ran out of
+        // allotted wall-clock.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(3)),
+            &[
+                stream_header(1),
+                answer("partial"),
+                outcome("time-truncated", "due", 2, 0),
+            ],
+            &stats_with(3),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            t,
+            Termination::Truncated {
+                bound_by: Some("due".to_string())
+            }
+        );
+        assert!(t.time_truncated() && !t.spend_truncated());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unknown_outcome_name_falls_back_to_the_exit_code() {
+        // A future outcome string must not read as complete. The code is the safe
+        // direction to decide from: it cannot invent an answer that is not there.
+        let t = classify(
+            Forced::No,
+            Some(exit_status(4)),
+            &[stream_header(1), outcome("some-future-outcome", "", 0, 0)],
+            &stats_with(2),
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(t, Termination::NoAnswer);
+        assert_ne!(t, Termination::Completed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unlimited_cap_is_negative_one_and_not_a_cap_of_nothing() {
+        // The `deadline-only` case. `cap_micros: -1` means no spend cap; reading it
+        // as zero would report a run that spent anything as having blown its budget.
+        let unlimited = OutcomeEvent {
+            cap_micros: -1,
+            total_micros: 360_000,
+            ..OutcomeEvent::default()
+        };
+        assert!(!unlimited.has_spend_cap());
+        let capped = OutcomeEvent {
+            cap_micros: 0,
+            ..OutcomeEvent::default()
+        };
+        assert!(
+            capped.has_spend_cap(),
+            "a cap of zero is a real cap that funds nothing, not the absence of one"
+        );
     }
 
     #[test]

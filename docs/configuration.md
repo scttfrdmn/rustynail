@@ -618,24 +618,97 @@ Events already emitted before a kill are kept and reported. A killed run is a
 truncated run, not a discarded one — the money was already spent, so the receipt
 has to survive.
 
+### The event stream is *framed*, and the frame is the host's half
+
+Every run is spawned with `--events-json`, which is not optional and not a
+verbosity setting. Without it quarry writes a human-readable summary to stdout and
+emits **no events at all** — so omitting it does not degrade the stream, it removes
+it, and every run then classifies as `stream_malformed`. That is not hypothetical:
+this integration shipped without the flag, and the bug went unnoticed because the
+test fake printed its canned events regardless of how it was invoked.
+
+Six event kinds arrive, not four:
+
+```
+quarry_stream    ← the frame opens: contract version and producer
+  model          ┐
+  answer         │ agate's four, which any host of an agate twin can read
+  receipt        │
+  artifact       ┘
+quarry_outcome   ← the frame closes: quarry's own verdict on the run
+```
+
+The two `quarry_*` events are quarry's own framing rather than agate's, and they
+carry the facts a supervising host exists to read:
+
+- **`quarry_stream.version`** is on the first line so a host can *refuse* a stream
+  it cannot read. Adding an event *kind* is a minor change a host must tolerate;
+  changing a field or what a kind means is major and bumps this number. A version
+  this build does not implement is therefore refused, not folded — the events we
+  still recognise may no longer mean what we read them to mean.
+- **`quarry_outcome`** states `outcome`, `bound_by`, `gaps`, `unfunded`, and the
+  money in **integer micro-units**. Its *absence* is as load-bearing as its
+  content: NDJSON yields complete lines whether or not the producer finished, so a
+  stream cut off after the artifact is byte-identical to a clean one except for
+  this missing closer. It is the only in-band way to tell a killed run from a
+  completed one.
+
+An unknown event kind is forwarded, counted, and otherwise ignored — quarry's union
+is open by design, and a host that rejected a new kind would break on quarry's next
+release.
+
 ### How a run's outcome is classified
 
 | Outcome | Meaning |
 |---------|---------|
-| `completed` | Clean exit, an answer, and quarry's record shows nothing was cut short |
-| `truncated` | Clean exit with an answer, but a cap bit. `truncated_by` names which: `spend`, `latency`, or `due`. **A legitimate result** |
+| `completed` | The run finished. Includes **cap-bound degradation**: quarry planned to fit the cap it was given and did, so being priced out of a branch is the plan working, not a failure |
+| `truncated` | An answer, but a cap bit. `truncated_by` names which: `spend`, `latency`, or `due`. **A legitimate result** — a partial answer with its gaps named is what quarry promises to return |
 | `no_answer` | quarry produced nothing affordable. Its record is still written and still citable |
 | `timed_out` | `run_timeout_seconds` fired. Time truncation |
 | `cancelled` | Cancelled mid-flight, including at shutdown. Time truncation |
-| `crashed` | Non-zero exit that is not `no_answer`. A fault, not degradation |
+| `crashed` | A fault (exit 1). Something broke that has nothing to do with what was asked |
+| `usage_error` | quarry refused the invocation (exit 2). **A host defect**: the arguments we built are wrong, so there is nothing to retry and nothing to cite |
 | `killed_by_signal` | Terminated by a signal; the child's own error reporting never ran |
 | `stream_malformed` | The child emitted no parseable event at all — wrong binary, or a contract break |
+| `stream_version_unsupported` | The stream declared a contract version this build does not implement. Refused rather than folded |
+| `stream_incomplete` | The frame opened and never closed: the run was killed. Events read before the cut are kept — they were paid for |
 
-The truncation verdict is read from quarry's own record file, never inferred from
-how many events arrived: a short stream is equally consistent with a small tree, a
-crash, or a deadline. An individually unparseable **line** is skipped, recorded,
-and the run continues; a **stream** with no events at all is `stream_malformed`,
-which is a different fault and should not be retried the same way.
+quarry's exit codes are read as the documented five — `0` complete, `1` fault, `2`
+usage, `3` time-truncated, `4` no answer — and where the frame closed, its
+`outcome` field outranks them. Exit **3** is the one worth naming: a run whose
+deadline bit may still hold a perfectly good partial answer, and reporting that as
+a crash throws away exactly the result the system promises to return.
+
+Truncation is read from quarry's own verdict, never inferred from how many events
+arrived: a short stream is equally consistent with a small tree, a crash, or a
+deadline. An individually unparseable **line** is skipped, recorded, and the run
+continues; a **stream** with no events at all is `stream_malformed`, which is a
+different fault and should not be retried the same way.
+
+#### Two things that are never the same, and never summed
+
+`gaps` counts nodes **time** cut short. `unfunded` counts nodes the spend cap
+priced out. They are different denominations, and adding them would offer a caller
+more time when what they needed was money. Only time makes a gap.
+
+Relatedly, **absence is not zero**, in three places:
+
+| On the wire | Means | Not |
+|---|---|---|
+| `cap_micros: -1` | no spend cap | a cap of nothing (a cap of `0` is a real cap that funds nothing, and says so) |
+| `bound_by: ""` | no cap bound this run — a measurement, emitted deliberately | a missing field |
+| no `provenance` object | quarry **declined to publish** a stability rate | a stability of 0% |
+
+The last one has no in-band alternative: `stability` is a non-nullable number, so
+quarry omits the whole object rather than claim a rate it cannot stand behind — and
+it does so in three distinct cases, including a single run, because one run is one
+sample and no distribution exists.
+
+All of this is asserted against quarry's own frozen capture corpus, vendored under
+`tests/fixtures/quarry/runevents/` and exercised by `tests/quarry_conformance.rs`.
+Those tests read bytes quarry produced and compare our reading against quarry's own
+restatement of the same bytes in integers — two independent readings of one wire
+capture, rather than a fixture we wrote agreeing with itself.
 
 ### Shutdown
 

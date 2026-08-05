@@ -27,16 +27,44 @@
 //! quarry's ledger is the number that lands in ours. Truncating would lose up to a
 //! micro-unit per row.
 //!
-//! # What this stream does *not* carry
+//! # The stream we read is *framed*, and the frame is the host's half
 //!
-//! Notably absent: `Gap`, `BoundBy`, truncation. The event stream is a **lossy
-//! projection** of the `RunRecord` (quarry's own word), built for a cost-and-trust
-//! UI. It cannot tell you whether a run was cut short by time or priced out by its
-//! cap — the distinction quarry is most emphatic about keeping. That verdict comes
-//! from [`RunRecordSummary`], read from the record file after exit. See
-//! `supervisor::Termination` for why the supervisor refuses to guess it from the
-//! stream.
+//! quarry has two folds, and the difference is easy to get wrong because only one
+//! of them is named after the type. `RunEvents` produces agate's four events —
+//! `model`, `answer`, `receipt`, `artifact` — and carries no `Gap`, no `BoundBy`
+//! and no truncation, because agate's schema has no gap representation.
+//! **`HostRunEvents` wraps those four in a frame**, and `cmd/quarry/run.go` calls
+//! the framed one:
+//!
+//! ```text
+//! {"type":"quarry_stream","version":1,"producer":"quarry-go"}   first
+//!   … agate's four events, byte-identical …
+//! {"type":"quarry_outcome","outcome":…,"bound_by":…,"gaps":…}   last
+//! ```
+//!
+//! Both frame kinds are namespaced `quarry_*` precisely because they are *not* part
+//! of agate's union: agate's models declare `extra="forbid"` and have nowhere to put
+//! a gap, so — in quarry's words — "the ONE fact a supervising host most needs …
+//! cannot ride on any event agate accepts." We are the host it was added for, so
+//! these two get first-class variants rather than being folded into
+//! [`RunEvent::Unknown`] with the genuinely unknown kinds.
+//!
+//! [`StreamEvent::version`] exists so a host can **refuse** a stream, which it
+//! cannot do by inspecting events it has never seen. [`OutcomeEvent`] carries the
+//! classification, the denomination that bit, and the gap and unfunded counts as
+//! *separate integers* — and its **absence** is the only in-band signal that a run
+//! was killed, since NDJSON yields whole lines either way.
+//!
+//! [`OutcomeEvent::total_micros`] is the one figure on the stream that is not a
+//! float: quarry's own ledger integers, carried so a host has nothing to reconcile.
+//! Prefer it over summing the receipt's rows.
+//!
+//! The record file is still read, but as corroboration rather than as the sole
+//! source — see [`RunRecordSummary`]. Deriving the verdict ourselves from
+//! `Truncated()` when quarry already sent us `Classify()`'s answer would be a
+//! second derivation that can disagree with the first.
 
+use crate::quarry::caps::UNLIMITED_MICRO_USD;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -106,6 +134,17 @@ pub struct ReceiptRow {
     pub kind: String,
     #[serde(default)]
     pub cost: f64,
+}
+
+impl ReceiptRow {
+    /// This row's cost in int64 micro-dollars.
+    ///
+    /// Convert each row with this **before** summing, never afterwards: two of
+    /// quarry's own fixtures carry rows that do not sum to the stated total in
+    /// float64, and they exist to fail a host that adds the floats first.
+    pub fn cost_micro_usd(&self) -> i64 {
+        usd_to_micro(self.cost)
+    }
 }
 
 /// The itemised receipt closing the run.
@@ -193,12 +232,137 @@ pub struct ArtifactEvent {
     pub provenance: Option<Provenance>,
 }
 
+// ── The frame (quarry's own events, not agate's) ───────────────────────────────
+
+/// The stream contract version this build understands.
+///
+/// A stream declaring anything else is **refused**, not folded. That is the whole
+/// purpose of the version line: quarry's rule is that adding an event *kind* is a
+/// minor change and does not bump this, while changing or removing a *field*, or
+/// changing what an existing kind means, is major and does. So a version we do not
+/// know is by definition a change we cannot absorb by skipping — the events we do
+/// recognise may no longer mean what we think.
+pub const SUPPORTED_STREAM_VERSION: u32 = 1;
+
+/// Opens a framed stream, declaring the contract version.
+///
+/// **First line, and it must be**: a host cannot refuse a stream it does not
+/// understand by inspecting events it has never seen, so the version precedes
+/// anything a consumer would try to fold.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct StreamEvent {
+    pub version: u32,
+    /// Which implementation wrote the stream — `"quarry-go"` for the Go binary.
+    ///
+    /// Recorded because there is a parallel Python quarry: the two agree on
+    /// behaviour but are not the same code, and a host reading a vendored fixture
+    /// months later needs to know which produced it.
+    #[serde(default)]
+    pub producer: String,
+}
+
+/// Closes a framed stream, stating how the run ended.
+///
+/// # Its absence is as load-bearing as its content
+///
+/// NDJSON yields complete lines whether or not the producer finished, so a run cut
+/// off after the artifact event looks exactly like one that finished cleanly. This
+/// terminal marker is the **only in-band way** to tell a killed run from a
+/// completed one — and a host reading a captured stream from a file has no exit code
+/// to fall back on.
+///
+/// # Gaps and unfunded are two denominations, never a sum
+///
+/// [`Self::gaps`] counts nodes **time** cut short; [`Self::unfunded`] counts nodes
+/// the spend cap priced out. quarry keeps them apart deliberately: only time
+/// produces a gap, and being priced out is *planned degradation inside authority*
+/// (disclosed before spend), not missing work. Adding them together would offer a
+/// sender more time when what they needed was money — the mislabelling quarry's two
+/// separate error sentinels exist to prevent.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OutcomeEvent {
+    /// quarry's own classification: `complete`, `time-truncated`,
+    /// `cap-bound-degradation`, or `no-answer`.
+    ///
+    /// Read rather than re-derived. quarry computes this from the record with a
+    /// documented precedence — no-answer first, then time, then spend — and a second
+    /// derivation here could disagree with the exit code, which comes from the same
+    /// call upstream.
+    #[serde(default)]
+    pub outcome: String,
+    /// The denomination that actually bit: `spend`, `latency`, `due`, or empty.
+    ///
+    /// **Empty is meaningful, not missing** — it means no cap bound this run. Which
+    /// cap bit is the difference between a useful remedy and a useless one: raising
+    /// the wrong cap buys nothing.
+    #[serde(default)]
+    pub bound_by: String,
+    /// Nodes **time** cut short. Zero is a measurement here, not an absence.
+    #[serde(default)]
+    pub gaps: u64,
+    /// Nodes the spend cap priced out. Not gaps. Never added to [`Self::gaps`].
+    #[serde(default)]
+    pub unfunded: u64,
+    /// The run's spend in integer micro-units — quarry's ledger, not a float.
+    ///
+    /// The one figure on this stream that is not a float, carried on quarry's own
+    /// event precisely so a host has nothing to reconcile. Prefer this over summing
+    /// [`ReceiptEvent::rows`].
+    #[serde(default)]
+    pub total_micros: i64,
+    /// The spend cap, or `-1` for unlimited.
+    ///
+    /// **`-1`, not `0`.** Zero reads as a cap of nothing, which would make an
+    /// uncapped run look infinitely overspent rather than unlimited.
+    ///
+    /// Note this is the one field here that must **not** default to zero when absent
+    /// from the wire. Every other field is a count or a string where zero and empty
+    /// are honest measurements; for this one, `#[serde(default)]` would silently turn
+    /// a missing cap into the tightest cap expressible.
+    #[serde(default = "unlimited_cap")]
+    pub cap_micros: i64,
+}
+
+/// [`UNLIMITED_MICRO_USD`], as serde's default for a missing `cap_micros`.
+fn unlimited_cap() -> i64 {
+    UNLIMITED_MICRO_USD
+}
+
+impl Default for OutcomeEvent {
+    /// Defaults to **no spend cap**, matching the wire default above rather than
+    /// `i64::default()`.
+    fn default() -> Self {
+        Self {
+            outcome: String::new(),
+            bound_by: String::new(),
+            gaps: 0,
+            unfunded: 0,
+            total_micros: 0,
+            cap_micros: unlimited_cap(),
+        }
+    }
+}
+
+impl OutcomeEvent {
+    /// Whether a spend cap was in force.
+    ///
+    /// A cap of zero is a real cap that funds nothing, and says so: only
+    /// [`UNLIMITED_MICRO_USD`] is the absence of one.
+    pub fn has_spend_cap(&self) -> bool {
+        self.cap_micros != UNLIMITED_MICRO_USD
+    }
+}
+
 /// One event from quarry's stream.
 ///
 /// [`RunEvent::Unknown`] is not an error path — see the module docs on the open
-/// union.
+/// union. [`RunEvent::Stream`] and [`RunEvent::Outcome`] are quarry's own framing
+/// events rather than agate's, and are first-class here because they carry the facts
+/// a supervising host exists to read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunEvent {
+    Stream(StreamEvent),
+    Outcome(OutcomeEvent),
     Model(ModelEvent),
     Answer(AnswerEvent),
     Receipt(ReceiptEvent),
@@ -216,6 +380,8 @@ impl RunEvent {
     /// The wire `type` discriminant.
     pub fn event_type(&self) -> &str {
         match self {
+            Self::Stream(_) => "quarry_stream",
+            Self::Outcome(_) => "quarry_outcome",
             Self::Model(_) => "model",
             Self::Answer(_) => "answer",
             Self::Receipt(_) => "receipt",
@@ -223,6 +389,31 @@ impl RunEvent {
             Self::Unknown { event_type, .. } => event_type,
         }
     }
+}
+
+/// The terminal outcome event in a stream, if one arrived.
+///
+/// Scans **backwards**, and does not read the last line. quarry's rule is that
+/// adding an event kind is a minor bump a host must tolerate, so a future kind may
+/// follow the outcome — keying on position would break on exactly the change the
+/// open union promises is safe. Upstream's own `TerminalOutcome` scans backwards for
+/// the same reason.
+///
+/// `None` means the stream had no terminal event, which for a stream read to EOF
+/// means **the run was killed**. It must never be defaulted to "complete".
+pub fn terminal_outcome(events: &[RunEvent]) -> Option<&OutcomeEvent> {
+    events.iter().rev().find_map(|e| match e {
+        RunEvent::Outcome(o) => Some(o),
+        _ => None,
+    })
+}
+
+/// The declared stream version, if the opening frame arrived.
+pub fn stream_version(events: &[RunEvent]) -> Option<u32> {
+    events.iter().find_map(|e| match e {
+        RunEvent::Stream(s) => Some(s.version),
+        _ => None,
+    })
 }
 
 // ── Line parsing ──────────────────────────────────────────────────────────────
@@ -282,6 +473,12 @@ pub fn parse_line(line: &str) -> Result<RunEvent, LineError> {
     };
 
     match event_type.as_str() {
+        "quarry_stream" => serde_json::from_value(value)
+            .map(RunEvent::Stream)
+            .map_err(bad),
+        "quarry_outcome" => serde_json::from_value(value)
+            .map(RunEvent::Outcome)
+            .map_err(bad),
         "model" => serde_json::from_value(value)
             .map(RunEvent::Model)
             .map_err(bad),
@@ -305,12 +502,9 @@ pub fn parse_line(line: &str) -> Result<RunEvent, LineError> {
 
 /// The part of quarry's `RunRecord` needed to classify how a run ended.
 ///
-/// # Why this exists at all
+/// # Why this exists, now that the frame carries the verdict
 ///
-/// The `RunEvent` stream carries no `Gap`, no `BoundBy` and no truncation flag —
-/// it is a projection built for a cost-and-trust UI, and quarry says so
-/// explicitly. But the one distinction quarry is most insistent about is exactly
-/// the one the stream drops:
+/// The distinction quarry is most insistent about is this one:
 ///
 /// > Only TIME is a gap. A node that could not be *afforded* is planned
 /// > degradation, recorded with empty content and no `Gap` flag.
@@ -318,12 +512,19 @@ pub fn parse_line(line: &str) -> Result<RunEvent, LineError> {
 /// quarry keeps `ErrRecordedGap` and `ErrRecordedUnfunded` as separate sentinels
 /// because reusing one "would relabel spend degradation as time truncation", and
 /// getting it backwards sends the wrong repair signal — raising the wrong cap buys
-/// nothing. A host that reported "timed out" for a run that was priced out would
-/// corrupt the receipt it hands back.
+/// nothing.
 ///
-/// So the authoritative verdict is read from quarry's **own record file** after
-/// exit. That is still quarry's output, not our inference: `BoundBy` and the `Gap`
-/// flags are facts of the original execution that quarry wrote down.
+/// **[`OutcomeEvent`] is the authority for that verdict**, not this type. It carries
+/// `outcome`, `bound_by`, `gaps` and `unfunded` directly, computed by quarry's own
+/// `Classify()` — the same call that produced the process exit code. Re-deriving the
+/// verdict here from `Truncated()` would be a second derivation that can disagree
+/// with the first, and there would be no way to tell which was right.
+///
+/// This type survives as **corroboration and detail**: the per-node view the
+/// terminal event summarises into two integers, still useful for a receipt that
+/// wants to name *which* nodes gapped. It is also the fallback when a stream
+/// arrives with no terminal event at all — but in that case the run was killed, and
+/// the record is being read to salvage what is knowable, not to declare success.
 ///
 /// # Field naming
 ///
@@ -464,6 +665,64 @@ impl StreamStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The frame ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_absent_cap_micros_deserialises_to_unlimited_and_not_to_zero() {
+        // Every other field on this event may honestly default to zero, because zero
+        // is a measurement for a count and empty is a measurement for `bound_by`. For
+        // this one field it is a lie in the dangerous direction: `#[serde(default)]`
+        // would turn a cap quarry did not state into the tightest cap expressible,
+        // and a run that spent anything would read as having blown its budget.
+        let line = r#"{"type":"quarry_outcome","outcome":"complete","total_micros":250}"#;
+        let event = match parse_line(line).expect("parses") {
+            RunEvent::Outcome(o) => o,
+            other => panic!("expected an outcome event, got {other:?}"),
+        };
+        assert_eq!(event.cap_micros, UNLIMITED_MICRO_USD);
+        assert!(!event.has_spend_cap(), "an unstated cap is no cap");
+
+        // And the explicit forms, which must not collapse into each other.
+        let unlimited = parse_outcome(r#"{"type":"quarry_outcome","cap_micros":-1}"#);
+        assert!(!unlimited.has_spend_cap());
+        let funds_nothing = parse_outcome(r#"{"type":"quarry_outcome","cap_micros":0}"#);
+        assert!(
+            funds_nothing.has_spend_cap(),
+            "a cap of zero is a real cap that funds nothing, not the absence of one"
+        );
+        let real = parse_outcome(r#"{"type":"quarry_outcome","cap_micros":250000}"#);
+        assert!(real.has_spend_cap());
+    }
+
+    #[test]
+    fn the_default_outcome_event_is_uncapped_rather_than_capped_at_zero() {
+        // `#[derive(Default)]` would give `cap_micros: 0` here and disagree with the
+        // wire default above — so the two would differ depending on whether a field
+        // was absent or the value was constructed, which is the kind of split that
+        // shows up as a receipt claiming an overspend that never happened.
+        assert_eq!(OutcomeEvent::default().cap_micros, UNLIMITED_MICRO_USD);
+        assert!(!OutcomeEvent::default().has_spend_cap());
+    }
+
+    #[test]
+    fn an_empty_bound_by_is_carried_rather_than_dropped() {
+        // quarry emits `""` because "no cap bound this run" is a finding, not an
+        // omission. Which cap bit is the difference between a useful remedy and a
+        // useless one.
+        let event =
+            parse_outcome(r#"{"type":"quarry_outcome","outcome":"complete","bound_by":""}"#);
+        assert_eq!(event.bound_by, "");
+        let bound = parse_outcome(r#"{"type":"quarry_outcome","bound_by":"latency"}"#);
+        assert_eq!(bound.bound_by, "latency");
+    }
+
+    fn parse_outcome(line: &str) -> OutcomeEvent {
+        match parse_line(line).expect("parses") {
+            RunEvent::Outcome(o) => o,
+            other => panic!("expected an outcome event, got {other:?}"),
+        }
+    }
 
     // ── Cost conversion ───────────────────────────────────────────────────────
 
