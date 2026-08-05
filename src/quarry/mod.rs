@@ -12,6 +12,7 @@
 //! - [`gate`] — sequencing a run behind its approval: ask, wait, then maybe spawn.
 //! - [`event`] — the `RunEvent` wire types and the NDJSON line parser.
 //! - [`supervisor`] — spawning, lifecycle, and outcome classification.
+//! - [`receipt`] — the reply: the answer, and what it cost and how much to trust it.
 //!
 //! # Request and policy are separate layers on purpose
 //!
@@ -26,12 +27,21 @@
 //! the sender decides whether to spend under it. Both are required — an operator
 //! who permits $50 has not asked for $50 to be spent, and a sender who asks for
 //! $50 has not been permitted it.
+//!
+//! # And afterwards, the sender is told what it cost
+//!
+//! [`receipt`] closes the loop the plan gate opened: disclosure before spend, then
+//! an accounting after it. It is not configurable and not omissible — an answer with
+//! no cost and no trust information attached is the artifact quarry exists to
+//! replace, so a reply too long for a platform is chunked rather than stripped of
+//! its footer.
 
 pub mod approval;
 pub mod caps;
 pub mod event;
 pub mod gate;
 pub mod policy;
+pub mod receipt;
 pub mod supervisor;
 
 pub use approval::{
@@ -52,6 +62,7 @@ pub use policy::{
     CapAdjustment, CapsPolicy, ConfigCapsPolicy, Denomination, Grant, OverLimit, PolicyRefusal,
     ScopeError, ScopeTags,
 };
+pub use receipt::{Receipt, Stability};
 pub use supervisor::{RunOutcome, RunRequest, SpawnError, Supervisor, Termination};
 
 /// A stand-in `quarry` binary for tests.
