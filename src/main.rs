@@ -401,6 +401,29 @@ fn cmd_config_check() -> Result<()> {
             "disabled"
         }
     );
+    // Phrased as the effect on a run, not as the value of `verification.enabled`:
+    // "verified" and "every run refused" are both `enabled: true`, and a summary
+    // that reported the setting would print the same word for both. Whether a
+    // verifier exists is asked of a real gate rather than assumed, so this line
+    // stops saying "refused" on its own once #103 installs one.
+    println!(
+        "  Quarry:           {}",
+        if !config.quarry.enabled {
+            "disabled"
+        } else if !config.quarry.verification.enabled {
+            "enabled (UNVERIFIED — signature checks off)"
+        } else if rustynail::quarry::verify::SpawnGate::new(
+            config.quarry.verification.clone(),
+            config.quarry.run_record_dir.clone(),
+            Some(config.gateway.http_port),
+        )
+        .has_verifier()
+        {
+            "enabled (signature verification on)"
+        } else {
+            "enabled (every run refused: no verifier — see config validate)"
+        }
+    );
 
     Ok(())
 }
@@ -486,6 +509,14 @@ fn cmd_config_validate() -> Result<()> {
         }
     }
 
+    // ── Check 4: quarry binary verification ───────────────────────────────────
+    //
+    // Reports the *effect* of the configuration, not the configuration. An operator
+    // reading "enabled: true" would reasonably conclude runs are verified; with
+    // #103's mechanism unimplemented they are refused instead, and the difference
+    // between "verified" and "refused" is the one this check exists to state.
+    failures += check_quarry_verification(&config);
+
     // ── Summary ───────────────────────────────────────────────────────────────
     if failures == 0 {
         println!("[✓] All checks passed.");
@@ -494,6 +525,95 @@ fn cmd_config_validate() -> Result<()> {
         println!("\n{} check(s) failed.", failures);
         std::process::exit(1);
     }
+}
+
+/// Report what will actually happen to a quarry spawn, and count the failures.
+///
+/// Deliberately not a `[✓]`/`[✗]` pair. There are four distinct states and three of
+/// them are neither pass nor fail:
+///
+/// - quarry disabled — nothing to verify, and no reason to nag
+/// - verification on with a mechanism — runs are verified: pass
+/// - verification on with **no** mechanism — every run is refused: fail, because a
+///   gateway that will refuse every quarry run should not report a clean preflight
+/// - verification off — runs happen and are unverified: a warning that is *not* a
+///   failure, since it is a deliberate development setting, but never silent
+fn check_quarry_verification(config: &Config) -> usize {
+    let v = &config.quarry.verification;
+
+    if !config.quarry.enabled {
+        println!("[✓] Quarry: disabled (no binary is spawned, nothing to verify)");
+        return 0;
+    }
+
+    if !v.enabled {
+        // Not counted as a failure — `enabled: false` is a choice an operator made.
+        // Stated in terms of consequence rather than setting, because "verification
+        // disabled" understates it: the manifest is still checked, the provenance is
+        // not, and only the second half is what an unsigned local build gives up.
+        println!(
+            "[!] Quarry: signature verification DISABLED \
+             (quarry.verification.enabled = false)"
+        );
+        println!("      Runs will execute unverified. The capability manifest is still");
+        println!("      checked, but from an unsigned sidecar that proves nothing about");
+        println!("      provenance. Development only — do not ship this.");
+        return 0;
+    }
+
+    // Verification is on. Whether it can be satisfied is the question.
+    let mut missing: Vec<&str> = Vec::new();
+    if v.expected_identity.trim().is_empty() {
+        missing.push("quarry.verification.expected_identity");
+    }
+    if v.expected_issuer.trim().is_empty() {
+        missing.push("quarry.verification.expected_issuer");
+    }
+
+    // The mechanism (#103) is not implemented, so no verifier can be installed. Asked
+    // of a real gate rather than hardcoded, so that this check starts reporting
+    // success on its own the day #103 lands — a preflight that had to be edited
+    // separately is a preflight that goes stale.
+    let gate = rustynail::quarry::verify::SpawnGate::new(
+        v.clone(),
+        config.quarry.run_record_dir.clone(),
+        Some(config.gateway.http_port),
+    );
+
+    if !gate.has_verifier() {
+        println!("[✗] Quarry: verification is enabled but no verifier is installed");
+        println!("      Every quarry run will be REFUSED (mechanism_unavailable).");
+        println!("      The cosign mechanism is tracked as #103 and is not implemented");
+        println!("      yet. Until it lands, either leave quarry disabled or set");
+        println!("      quarry.verification.enabled: false to run unverified.");
+        return 1;
+    }
+
+    if !missing.is_empty() {
+        // An unconstrained check is worse than none, because it succeeds. So an
+        // absent identity is a failure even though a verifier is present.
+        println!(
+            "[✗] Quarry: verification is enabled but {} is not set",
+            missing.join(" and ")
+        );
+        println!("      Every quarry run will be REFUSED: verifying without an expected");
+        println!("      identity would accept any signature at all.");
+        return 1;
+    }
+
+    println!("[✓] Quarry: signature verification enabled");
+    println!("      identity: {}", v.expected_identity);
+    println!("      issuer:   {}", v.expected_issuer);
+    println!("      cosign:   {}", v.cosign_path);
+    if v.allow_writable_binary {
+        // Not a failure — an explicit opt-in — but the risk is restated, because the
+        // operator who accepted it is often not the one reading this output.
+        println!(
+            "[!] Quarry: allow_writable_binary is set, so a writable binary or \
+             directory will not stop a spawn"
+        );
+    }
+    0
 }
 
 /// `rustynail completions <shell>` — print shell completion script.

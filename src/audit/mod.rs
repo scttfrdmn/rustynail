@@ -53,12 +53,20 @@ pub enum AuditEvent {
     /// keys only, never the values. The child gets an explicitly constructed
     /// environment rather than an inherited one, and this is the record that lets
     /// an operator confirm no provider or channel credential leaked into it.
+    /// `binary_digest` is the sha256 that passed verification and is what executed,
+    /// and `signature_checked` says whether a signature was actually checked or the
+    /// development escape hatch was in use. Both are on the *started* event rather
+    /// than only on the verification event, because "what ran, exactly" is the
+    /// question asked of a specific run after the fact, and correlating two events by
+    /// timestamp to answer it is how the answer gets it wrong.
     QuarryRunStarted {
         run_id: String,
         user_id: String,
         channel_id: String,
         binary_path: String,
         env_keys: Vec<String>,
+        binary_digest: String,
+        signature_checked: bool,
     },
     /// A quarry subprocess ended.
     ///
@@ -132,6 +140,42 @@ pub enum AuditEvent {
         latency_seconds: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         due: Option<String>,
+    },
+    /// A quarry spawn was refused because the binary could not be verified.
+    ///
+    /// `reason` is the specific check that failed — `unsigned`, `wrong_identity`,
+    /// `manifest_rejected`, `mechanism_unavailable`, and so on — never a generic
+    /// "verification failed", because that sends an operator hunting through every
+    /// possible cause. `detail` carries the operator-facing sentence; the sender is
+    /// told only that the capability is unavailable.
+    ///
+    /// `digest` is **absent** for the checks that run before hashing (a missing
+    /// binary has no digest), rather than an empty string pretending to be one.
+    ///
+    /// The configured identity and issuer are recorded so a wrong-identity refusal
+    /// can be diagnosed without also having the config to hand — the usual case when
+    /// reading an audit log after the fact.
+    QuarryVerificationRefused {
+        reason: String,
+        detail: String,
+        binary_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_identity: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_issuer: Option<String>,
+    },
+    /// A quarry binary passed verification and may be spawned.
+    ///
+    /// Logged for passes as well as refusals, because `signature_checked: false` —
+    /// the development escape hatch — is the fact that a later audit most needs, and
+    /// it cannot be recovered from refusals. An audit log that cannot tell a verified
+    /// run from an unverified one cannot answer the question it exists for.
+    QuarryVerificationPassed {
+        binary_path: String,
+        digest: String,
+        signature_checked: bool,
     },
     /// A quarry run could not be started, or failed in supervision.
     QuarryRunFailed {

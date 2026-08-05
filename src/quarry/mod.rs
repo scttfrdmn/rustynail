@@ -11,6 +11,7 @@
 //! - [`approval`] — the plan gate: the sender approves in chat before any spend.
 //! - [`gate`] — sequencing a run behind its approval: ask, wait, then maybe spawn.
 //! - [`event`] — the `RunEvent` wire types and the NDJSON line parser.
+//! - [`verify`] — the signed-binary gate the spawn path passes through first.
 //! - [`supervisor`] — spawning, lifecycle, and outcome classification.
 //! - [`receipt`] — the reply: the answer, and what it cost and how much to trust it.
 //!
@@ -43,6 +44,7 @@ pub mod gate;
 pub mod policy;
 pub mod receipt;
 pub mod supervisor;
+pub mod verify;
 
 pub use approval::{
     classify_reply, render_cancelled, render_clarification, render_expired, render_plan,
@@ -64,6 +66,10 @@ pub use policy::{
 };
 pub use receipt::{Receipt, Stability};
 pub use supervisor::{RunOutcome, RunRequest, SpawnError, Supervisor, Termination};
+pub use verify::{
+    CapabilityManifest, ExpectedCapabilities, ManifestFault, SignatureVerifier, SignedMaterial,
+    SpawnGate, VerificationRefusal, Verified, VerifyRequest,
+};
 
 /// A stand-in `quarry` binary for tests.
 ///
@@ -93,6 +99,8 @@ pub(crate) mod fake {
         /// Touched by the script once it has emitted its stdout, when
         /// [`FakeBehavior::ready_file`] is set.
         pub ready: PathBuf,
+        /// Where [`Self::write_manifest`] puts the development capability manifest.
+        pub manifest: PathBuf,
     }
 
     /// What the fake binary should do.
@@ -243,11 +251,15 @@ pub(crate) mod fake {
             drop(f);
             make_executable(&path);
 
+            let mut manifest = path.as_os_str().to_os_string();
+            manifest.push(".manifest.json");
+
             FakeQuarry {
                 _dir: dir,
                 path,
                 env_dump,
                 ready,
+                manifest: PathBuf::from(manifest),
             }
         }
     }
@@ -255,6 +267,21 @@ pub(crate) mod fake {
     impl FakeQuarry {
         pub fn path_str(&self) -> String {
             self.path.display().to_string()
+        }
+
+        /// Write the sidecar manifest a development-mode spawn needs.
+        ///
+        /// The fake is spawned through the real [`super::verify::SpawnGate`], not
+        /// around it, so every supervisor test exercises the verification path it
+        /// would in production. Development mode is the only mode a test can use —
+        /// there is no signed fake binary to produce — but the manifest capability
+        /// check is *not* relaxed by it, so the manifest has to be real.
+        pub fn write_manifest(&self, gateway_port: u16, run_record_dir: &str) {
+            std::fs::write(
+                &self.manifest,
+                super::verify::development_manifest_json(gateway_port, run_record_dir),
+            )
+            .expect("write fake manifest");
         }
 
         /// Environment variable names the child actually received.
@@ -309,6 +336,23 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    /// The port every fake manifest in these tests declares as its egress target.
+    const TEST_GATEWAY_PORT: u16 = 8080;
+
+    /// A supervisor over `fake`, with its manifest written and the gate wired.
+    ///
+    /// Goes through the real [`super::verify::SpawnGate`] rather than around it, so a
+    /// change that breaks verification breaks these tests too.
+    fn supervisor(fake: &super::fake::FakeQuarry, runs_dir: &std::path::Path) -> Supervisor {
+        supervisor_with(fake, config(fake, runs_dir))
+    }
+
+    /// As [`supervisor`], for a test that has adjusted the config first.
+    fn supervisor_with(fake: &super::fake::FakeQuarry, cfg: QuarryConfig) -> Supervisor {
+        fake.write_manifest(TEST_GATEWAY_PORT, &cfg.run_record_dir);
+        Supervisor::new(cfg).with_gateway_port(TEST_GATEWAY_PORT)
+    }
+
     fn config(fake: &super::fake::FakeQuarry, runs_dir: &std::path::Path) -> QuarryConfig {
         QuarryConfig {
             enabled: true,
@@ -325,6 +369,8 @@ mod tests {
             // These tests drive the supervisor with caps already clamped; policy
             // resolution has its own tests in `policy`.
             policy: crate::config::QuarryPolicyConfig::default(),
+            // Signatures off, manifest check on. See `verify::development_config`.
+            verification: super::verify::development_config(),
         }
     }
 
@@ -332,7 +378,7 @@ mod tests {
     async fn a_happy_run_parses_its_stream_and_completes() {
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(
@@ -365,7 +411,7 @@ mod tests {
         // exit, the receiver would be empty until the child was gone.
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let out = s
@@ -399,7 +445,7 @@ mod tests {
         // dashboard — must not be able to kill a run that is spending money.
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         drop(rx);
 
@@ -417,7 +463,7 @@ mod tests {
         // what the OS actually handed the child, not against what we meant to pass.
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let mut req = RunRequest::new("u1", "c", "why", 1_000_000);
         // A caller that wrongly tries to forward secrets. env_clear() means the
@@ -462,7 +508,7 @@ mod tests {
         std::env::set_var("RUSTYNAIL_QUARRY_INHERIT_PROBE", "should-not-appear");
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         s.run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
             .await
@@ -487,7 +533,7 @@ mod tests {
             .insert(3, r#"{"no_type_field":true}"#.into());
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -513,7 +559,7 @@ mod tests {
         }
         .build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -535,7 +581,7 @@ mod tests {
         );
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -564,7 +610,7 @@ mod tests {
         ];
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -590,7 +636,7 @@ mod tests {
             .collect();
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = tokio::time::timeout(
             Duration::from_secs(30),
@@ -633,7 +679,7 @@ mod tests {
         );
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -666,7 +712,7 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
         let mut cfg = config(&fake, runs.path());
         cfg.run_timeout_seconds = 1;
-        let s = Supervisor::new(cfg);
+        let s = supervisor_with(&fake, cfg);
 
         let started = std::time::Instant::now();
         let out = s
@@ -705,7 +751,7 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
         let mut cfg = config(&fake, runs.path());
         cfg.run_timeout_seconds = 1;
-        let s = Supervisor::new(cfg);
+        let s = supervisor_with(&fake, cfg);
 
         let started = std::time::Instant::now();
         let out = s
@@ -737,7 +783,7 @@ mod tests {
         behavior.ready_file = true;
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = std::sync::Arc::new(Supervisor::new(config(&fake, runs.path())));
+        let s = std::sync::Arc::new(supervisor(&fake, runs.path()));
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
         let ready = fake.ready.clone();
@@ -781,7 +827,7 @@ mod tests {
         behavior.sleep_secs = 30.0;
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
@@ -818,7 +864,7 @@ mod tests {
         }
         .build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -858,7 +904,7 @@ mod tests {
         }
         .build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -892,7 +938,7 @@ mod tests {
         behavior.record_json = None;
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
@@ -912,7 +958,7 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
         let mut cfg = config(&fake, runs.path());
         cfg.max_concurrent_runs = 2;
-        let s = std::sync::Arc::new(Supervisor::new(cfg));
+        let s = std::sync::Arc::new(supervisor_with(&fake, cfg));
 
         let mut handles = Vec::new();
         for i in 0..3 {
@@ -953,7 +999,7 @@ mod tests {
             .push(r#"{"type":"model","label":"argv-probe","cost":0}"#.into());
         let fake = behavior.build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let mut req = RunRequest::new("u1", "c", "why is the sky blue", 2_500_000);
         req.deadline = Some(Duration::from_secs(90));
@@ -998,7 +1044,7 @@ mod tests {
 
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)
             .await
@@ -1015,7 +1061,7 @@ mod tests {
         // flag, this test — not a future production incident — is what notices.
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let mut req = RunRequest::new("u1", "c", "why", 1_000_000);
         req.suppress_events_json_for_test = true;
@@ -1039,7 +1085,7 @@ mod tests {
         // each other's record — the artifact that makes a run citable.
         let fake = FakeBehavior::happy().build();
         let runs = tempfile::tempdir().unwrap();
-        let s = Supervisor::new(config(&fake, runs.path()));
+        let s = supervisor(&fake, runs.path());
 
         let out = s
             .run(RunRequest::new("u1", "c", "why", 1_000_000), None, None)

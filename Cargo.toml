@@ -105,6 +105,11 @@ scraper = "0.19"
 # Constant-time comparison for bearer token auth
 subtle = "2"
 
+# faccessat(2) for the quarry binary writability check. Mode-bit arithmetic gets
+# ACLs, supplementary groups and read-only mounts wrong, and every one of those
+# errors reports a writable file as safe — so ask the kernel instead.
+libc = "0.2"
+
 [dev-dependencies]
 mockall = "0.12"
 tempfile = "3"

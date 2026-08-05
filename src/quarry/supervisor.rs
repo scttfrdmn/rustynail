@@ -463,6 +463,17 @@ pub enum SpawnError {
     BinaryUnavailable { path: String, detail: String },
     /// The run directory could not be created.
     RunDirUnavailable { path: String, detail: String },
+    /// The binary could not be verified, so it was not run.
+    ///
+    /// Carries the specific check that failed rather than collapsing to "refused":
+    /// the operator needs to know whether the signature was absent, from the wrong
+    /// identity, or simply unverifiable because no mechanism is installed. The
+    /// sender-facing text comes from
+    /// [`crate::quarry::verify::VerificationRefusal::sender_message`] and names none
+    /// of it.
+    Unverified {
+        refusal: crate::quarry::verify::VerificationRefusal,
+    },
 }
 
 impl std::fmt::Display for SpawnError {
@@ -485,6 +496,7 @@ impl std::fmt::Display for SpawnError {
             Self::RunDirUnavailable { path, detail } => {
                 write!(f, "cannot create run directory {path}: {detail}")
             }
+            Self::Unverified { refusal } => write!(f, "{refusal}"),
         }
     }
 }
@@ -500,6 +512,32 @@ impl SpawnError {
             Self::NoCap => "no_cap",
             Self::BinaryUnavailable { .. } => "binary_unavailable",
             Self::RunDirUnavailable { .. } => "run_dir_unavailable",
+            // The specific failing check, not a generic `unverified`: a code that
+            // could not distinguish "no signature" from "no mechanism installed"
+            // would be the operator-hunting problem this issue exists to avoid.
+            Self::Unverified { refusal } => refusal.code(),
+        }
+    }
+
+    /// What the sender is told.
+    ///
+    /// Every variant but one is an operator configuration problem the sender can do
+    /// nothing about, and verification refusals must additionally not leak a path,
+    /// digest, or identity regex. [`Self::AtCapacity`] is the exception: a transient
+    /// condition the sender can act on by waiting.
+    pub fn sender_message(&self) -> &str {
+        match self {
+            Self::Unverified { refusal } => refusal.sender_message(),
+            Self::AtCapacity { .. } => {
+                "I am already running as many of those as I can at once. Try again shortly."
+            }
+            Self::Disabled
+            | Self::NoCap
+            | Self::BinaryUnavailable { .. }
+            | Self::RunDirUnavailable { .. } => {
+                "That capability is unavailable right now. This is a configuration problem on \
+                 my side, not something wrong with your request."
+            }
         }
     }
 }
@@ -565,6 +603,13 @@ fn sanitize_env(env: &BTreeMap<String, String>) -> (BTreeMap<String, String>, Ve
 /// Spawns quarry runs, bounded by a concurrency limit, and reaps their output.
 pub struct Supervisor {
     config: QuarryConfig,
+    /// Signed-binary verification, checked before every spawn.
+    ///
+    /// Not an [`Option`]. A supervisor with no gate would be a supervisor that spawns
+    /// unverified binaries, and the way that ships accidentally is a field somebody
+    /// forgot to set — so [`Supervisor::new`] always builds one, and the only way to
+    /// skip the signature check is the config setting that says so and warns.
+    gate: crate::quarry::verify::SpawnGate,
     /// Runs currently executing. An [`AtomicUsize`] rather than a semaphore
     /// because the limit is enforced by *refusal*: a permit-based limiter would
     /// make a caller wait, which is the queueing behaviour
@@ -589,16 +634,47 @@ impl Drop for ActiveGuard {
 
 impl Supervisor {
     /// Build a supervisor from config.
+    ///
+    /// The manifest's declared egress port cannot be checked without knowing this
+    /// gateway's own HTTP port, and a check that cannot run must refuse — so a
+    /// supervisor built this way refuses every manifest declaring egress. Callers
+    /// that will actually spawn must use [`Self::with_gateway_port`]; the gateway
+    /// does. Leaving it out is a refusal rather than a silently unchecked port.
     pub fn new(config: QuarryConfig) -> Self {
+        let gate = crate::quarry::verify::SpawnGate::new(
+            config.verification.clone(),
+            config.run_record_dir.clone(),
+            None,
+        );
         Self {
             config,
+            gate,
             active: Arc::new(AtomicUsize::new(0)),
             audit: None,
         }
     }
 
+    /// Tell the verification gate which localhost port the manifest may declare.
+    pub fn with_gateway_port(mut self, port: u16) -> Self {
+        self.gate.set_gateway_port(Some(port));
+        self
+    }
+
+    /// Install the signature verifier the gate calls into (#103's mechanism).
+    pub fn with_verifier(
+        mut self,
+        verifier: Arc<dyn crate::quarry::verify::SignatureVerifier>,
+    ) -> Self {
+        self.gate.set_verifier(Some(verifier));
+        self
+    }
+
     /// Attach an audit logger.
+    ///
+    /// The gate gets it too: a verification refusal is exactly the kind of thing an
+    /// operator reads the audit log to find.
     pub fn with_audit(mut self, audit: Option<Arc<AuditLogger>>) -> Self {
+        self.gate.set_audit(audit.clone());
         self.audit = audit;
         self
     }
@@ -667,6 +743,21 @@ impl Supervisor {
             self.audit_failed(None, &request.user_id, e.to_string());
         })?;
 
+        // Verification runs **before the run directory exists**, so that a refusal
+        // leaves no artifact behind — no child, and no empty run directory that a
+        // later reader would mistake for a run that happened. The negative tests
+        // assert that absence rather than merely asserting an error was returned,
+        // because an error return with the side effect already performed is the #90
+        // failure mode.
+        let verified = match self.gate.check(&self.config.binary_path).await {
+            Ok(v) => v,
+            Err(refusal) => {
+                let err = SpawnError::Unverified { refusal };
+                self.audit_failed(None, &request.user_id, err.to_string());
+                return Err(err);
+            }
+        };
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let run_dir = Path::new(&self.config.run_record_dir).join(&run_id);
         if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
@@ -731,6 +822,8 @@ impl Supervisor {
                 channel_id: request.channel_id.clone(),
                 binary_path: self.config.binary_path.clone(),
                 env_keys: env.keys().cloned().collect(),
+                binary_digest: verified.digest.clone(),
+                signature_checked: verified.signature_checked,
             });
         }
         info!(run_id = %run_id, user_id = %request.user_id, "quarry run started");
@@ -2158,18 +2251,19 @@ mod tests {
         let mut r = RunRequest::new("u", "c", "q", 1_000_000);
         r.spend_micro_usd = None;
         r.deadline = Some(Duration::from_secs(60));
-        // It gets as far as trying to execute, which is the point: NoCap did not
-        // reject it.
+        // It gets past the cap check, which is the point: NoCap did not reject it. It
+        // then fails at the verification gate, because the named binary does not
+        // exist — a *later* refusal, and the distinction the test is asserting.
         let err = s.run(r, None, None).await.unwrap_err();
-        assert!(
-            matches!(err, SpawnError::BinaryUnavailable { .. }),
-            "got {err:?}"
-        );
+        assert_eq!(err.code(), "binary_missing", "got {err:?}");
         assert_eq!(s.active_runs(), 0, "the failed spawn released its slot");
     }
 
     #[tokio::test]
-    async fn a_missing_binary_is_its_own_error_and_releases_the_slot() {
+    async fn a_missing_binary_is_refused_at_the_gate_before_any_spawn() {
+        // The gate resolves and hashes the binary, so a missing one is caught there
+        // rather than by `cmd.spawn()` — one refusal path, not two that could
+        // disagree about whether verification ran.
         let s = Supervisor::new(QuarryConfig {
             enabled: true,
             binary_path: "/nonexistent/definitely-not-quarry".into(),
@@ -2183,8 +2277,43 @@ mod tests {
             .run(RunRequest::new("u", "c", "q", 1_000_000), None, None)
             .await
             .unwrap_err();
-        assert_eq!(err.code(), "binary_unavailable");
+        assert_eq!(err.code(), "binary_missing");
         assert_eq!(s.active_runs(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_but_unexecutable_binary_still_reports_binary_unavailable() {
+        // `BinaryUnavailable` survives the gate's arrival because the gate checks that
+        // a file exists and hashes, not that the kernel will execute it: a
+        // non-executable regular file passes verification and fails at `execve`. The
+        // two errors are not redundant.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("quarry");
+        std::fs::write(&bin, b"not executable").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::write(
+            tmp.path().join("quarry.manifest.json"),
+            crate::quarry::verify::development_manifest_json(8080, "quarry-runs"),
+        )
+        .unwrap();
+
+        let s = Supervisor::new(QuarryConfig {
+            enabled: true,
+            binary_path: bin.display().to_string(),
+            run_record_dir: "quarry-runs".to_string(),
+            verification: crate::quarry::verify::development_config(),
+            ..config(1)
+        })
+        .with_gateway_port(8080);
+        let err = s
+            .run(RunRequest::new("u", "c", "q", 1_000_000), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "binary_unavailable", "got {err:?}");
+        assert_eq!(s.active_runs(), 0);
+        let _ = std::fs::remove_dir_all("quarry-runs");
     }
 
     #[test]
@@ -2201,9 +2330,60 @@ mod tests {
                 path: String::new(),
                 detail: String::new(),
             },
+            // `Unverified` delegates to the refusal's own code, so it contributes one
+            // of the fifteen verification codes rather than a code of its own — which
+            // is why the set below has one representative rather than all fifteen.
+            SpawnError::Unverified {
+                refusal: crate::quarry::verify::VerificationRefusal::Unsigned {
+                    digest: String::new(),
+                },
+            },
         ];
         let codes: std::collections::HashSet<_> = all.iter().map(|e| e.code()).collect();
         assert_eq!(codes.len(), all.len());
+    }
+
+    #[test]
+    fn a_spawn_error_tells_the_sender_nothing_about_the_hosts_configuration() {
+        // Every refusal but AtCapacity is an operator problem, and a verification
+        // refusal must additionally not leak a path or an identity regex.
+        let all = [
+            SpawnError::Disabled,
+            SpawnError::NoCap,
+            SpawnError::BinaryUnavailable {
+                path: "/opt/secret/quarry".into(),
+                detail: "no".into(),
+            },
+            SpawnError::RunDirUnavailable {
+                path: "/srv/private/runs".into(),
+                detail: "no".into(),
+            },
+            SpawnError::Unverified {
+                refusal: crate::quarry::verify::VerificationRefusal::WrongIdentity {
+                    digest: "deadbeef".into(),
+                    expected: "quarry-release".into(),
+                    found: "attacker".into(),
+                },
+            },
+        ];
+        for e in &all {
+            let msg = e.sender_message();
+            for leak in [
+                "/opt/secret",
+                "/srv/private",
+                "deadbeef",
+                "quarry-release",
+                "attacker",
+            ] {
+                assert!(!msg.contains(leak), "{} leaks '{leak}': {msg}", e.code());
+            }
+        }
+        assert!(
+            SpawnError::AtCapacity { limit: 2 }
+                .sender_message()
+                .contains("again"),
+            "capacity is transient and the sender can act on it"
+        );
     }
 
     // ── Retention ─────────────────────────────────────────────────────────────

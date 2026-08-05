@@ -140,7 +140,12 @@ Configuration OK
   Cron jobs:        2
   PDF tool:         enabled
   Image tool:       disabled
+  Quarry:           enabled (every run refused: no verifier — see config validate)
 ```
+
+The `Quarry:` line reports the **effect on a run**, not the value of a setting —
+"verified" and "every run refused" are both `verification.enabled: true`, and a line
+that echoed the setting would print the same word for both.
 
 **No side effects** — this command only reads config and exits. Safe to run in CI.
 
@@ -165,6 +170,12 @@ echo $?   # 0 = all passed, 1 = one or more failed
 | Redis URL set | When `memory.backend = "redis"` | `[✓] Memory backend: redis (url set)` |
 | SQLite path set | When `memory.backend = "sqlite"` | `[✓] Memory backend: sqlite (path set)` |
 | Postgres URL set | When `memory.backend = "postgres"` | `[✓] Memory backend: postgres (url set)` |
+| Quarry verification | Quarry is off, verification is deliberately off, or a verifier is installed with an identity configured | `[✓] Quarry: disabled (…)` |
+
+**`[!]` is a warning, not a failure.** It marks a state an operator chose
+deliberately — `verification.enabled: false`, or `allow_writable_binary` — that is
+worth restating but does not change the exit code. Three of the four quarry states
+are neither pass nor fail, so a bare `[✓]`/`[✗]` pair could not report them.
 
 **Exit codes:**
 
@@ -179,6 +190,7 @@ echo $?   # 0 = all passed, 1 = one or more failed
 [✓] Config loaded (config.yaml)
 [✓] API key present (anthropic)
 [✓] Memory backend: redis (url set)
+[✓] Quarry: disabled (no binary is spawned, nothing to verify)
 [✓] All checks passed.
 ```
 
@@ -190,6 +202,36 @@ echo $?   # 0 = all passed, 1 = one or more failed
 [✗] Memory backend is sqlite but memory.sqlite_path is not set
 
 2 check(s) failed.
+```
+
+**Example output (quarry on, verification unsatisfiable):**
+
+```
+[✓] Config loaded (config.yaml)
+[✓] API key present (anthropic)
+[✓] Memory backend: inmemory
+[✗] Quarry: verification is enabled but no verifier is installed
+      Every quarry run will be REFUSED (mechanism_unavailable).
+      The cosign mechanism is tracked as #103 and is not implemented
+      yet. Until it lands, either leave quarry disabled or set
+      quarry.verification.enabled: false to run unverified.
+
+1 check(s) failed.
+```
+
+This is the **shipped default** when `quarry.enabled: true` — the cosign mechanism
+([#103](https://github.com/scttfrdmn/rustynail/issues/103)) is not implemented, and
+verification fails closed rather than waving runs through. See
+[deployment.md](deployment.md#deploying-quarry-alongside-the-gateway).
+
+**Example output (quarry on, verification deliberately off):**
+
+```
+[!] Quarry: signature verification DISABLED (quarry.verification.enabled = false)
+      Runs will execute unverified. The capability manifest is still
+      checked, but from an unsigned sidecar that proves nothing about
+      provenance. Development only — do not ship this.
+[✓] All checks passed.
 ```
 
 Useful in CI/CD pipelines before deploying: add `rustynail config validate` as a pre-deploy step.
