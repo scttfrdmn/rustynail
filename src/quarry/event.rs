@@ -441,7 +441,7 @@ pub struct StreamStats {
     ///
     /// Happens when the child is killed but a *descendant* still holds the write
     /// end of the pipe — a `sleep`, a spawned verifier — so EOF never arrives and
-    /// jointly reading to the end would hang past our own timeout. The supervisor
+    /// blindly reading to the end would hang past our own timeout. The supervisor
     /// gives the drain a bounded grace period and then abandons it.
     ///
     /// When this is set, the counts above are a **lower bound**, not a total. That
